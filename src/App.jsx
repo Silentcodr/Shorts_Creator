@@ -279,8 +279,8 @@ function App() {
             const chunkText = chunks[i].trim();
             if (!chunkText) continue;
 
-            // Fetch audio from ElevenLabs
-            const response = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${elevenLabsVoice}`, {
+            // Fetch audio WITH timestamps from ElevenLabs for perfect sync
+            const response = await fetch(`https://api.elevenlabs.io/v1/text-to-speech/${elevenLabsVoice}/with-timestamps`, {
               method: 'POST',
               headers: {
                 'xi-api-key': elevenLabsKey,
@@ -301,10 +301,53 @@ function App() {
               throw new Error(err.detail?.message || 'ElevenLabs API Error');
             }
 
-            const blob = await response.blob();
-            const audioUrl = URL.createObjectURL(blob);
+            const data = await response.json();
+            const audioBytes = Uint8Array.from(atob(data.audio_base64), c => c.charCodeAt(0));
+            const audioBlob = new Blob([audioBytes], { type: 'audio/mpeg' });
+            const audioUrl = URL.createObjectURL(audioBlob);
             const audio = new Audio(audioUrl);
             audio.crossOrigin = 'anonymous';
+
+            // Build word-level timestamps from character-level alignment
+            const alignment = data.alignment;
+            const chars = alignment.characters;
+            const charStarts = alignment.character_start_times_seconds;
+            const charEnds = alignment.character_end_times_seconds;
+
+            // Map characters back to words with their exact start time
+            const words = chunkText.split(/\s+/).filter(w => w);
+            const wordTimestamps = []; // { word, startTime, endTime }
+            let charIdx = 0;
+
+            for (let w = 0; w < words.length; w++) {
+              const word = words[w];
+              // Skip whitespace characters in alignment
+              while (charIdx < chars.length && chars[charIdx].trim() === '') {
+                charIdx++;
+              }
+              const wordStart = charIdx < charStarts.length ? charStarts[charIdx] : 0;
+              // Advance through the word's characters
+              let wordEnd = wordStart;
+              for (let c = 0; c < word.length && charIdx < chars.length; c++) {
+                wordEnd = charEnds[charIdx] || wordEnd;
+                charIdx++;
+              }
+              wordTimestamps.push({ word, startTime: wordStart, endTime: wordEnd });
+            }
+
+            // Group words into phrases (sentences or max 6 words)
+            const phrases = [];
+            let currentPhrase = [];
+            for (let j = 0; j < words.length; j++) {
+                currentPhrase.push(words[j]);
+                if (words[j].match(/[.,!?]/) || currentPhrase.length >= 6) {
+                    phrases.push({ startIndex: j - currentPhrase.length + 1, words: currentPhrase });
+                    currentPhrase = [];
+                }
+            }
+            if (currentPhrase.length > 0) {
+                phrases.push({ startIndex: words.length - currentPhrase.length, words: currentPhrase });
+            }
 
             await new Promise((resolve) => {
               audio.onloadedmetadata = () => {
@@ -312,61 +355,23 @@ function App() {
                 const source = audioContext.createMediaElementSource(audio);
                 source.connect(audioDest);          // -> recording
                 source.connect(audioContext.destination); // -> speakers
-                
-                const words = chunkText.split(/\s+/).filter(w => w);
-                
-                // Group words into phrases (sentences or max 6 words)
-                const phrases = [];
-                let currentPhrase = [];
-                for (let j = 0; j < words.length; j++) {
-                    currentPhrase.push(words[j]);
-                    if (words[j].match(/[.,!?]/) || currentPhrase.length >= 6) {
-                        phrases.push({ startIndex: j - currentPhrase.length + 1, words: currentPhrase });
-                        currentPhrase = [];
-                    }
-                }
-                if (currentPhrase.length > 0) {
-                    phrases.push({ startIndex: words.length - currentPhrase.length, words: currentPhrase });
-                }
-
-                // Build character-weighted timing for better sync
-                // Longer words take proportionally more time to speak
-                const weights = words.map(w => {
-                  // Base weight: use syllable-like estimate (chars / 2.5), min 3 for tiny words
-                  let weight = Math.max(w.replace(/[.,!?;:]/g, '').length / 2.5, 3);
-                  // Generous pause after punctuation to match natural speech rhythm
-                  if (w.match(/[.!?]$/)) weight += 6;
-                  else if (w.match(/[,;:]$/)) weight += 4;
-                  return weight;
-                });
-                const totalWeight = weights.reduce((a, b) => a + b, 0);
-                // Build cumulative breakpoints: wordBreaks[i] = fraction of timeline where word i ends
-                const wordBreaks = [];
-                let cumulative = 0;
-                for (let w = 0; w < weights.length; w++) {
-                  cumulative += weights[w];
-                  wordBreaks.push(cumulative / totalWeight);
-                }
 
                 let lastWordIndex = -1;
                 audio.play();
                 
                 const animate = () => {
                   if (!audio.paused && !audio.ended && isPlaying) {
-                    // Slight lag offset so text doesn't run ahead of the voice
-                    const lagOffset = 0.04; // ~4% behind actual audio position
-                    const progress = Math.max(0, (audio.currentTime / audio.duration) - lagOffset);
+                    const currentTime = audio.currentTime;
                     
-                    // Find which word we're on using weighted breakpoints
+                    // Find which word is being spoken using exact timestamps
                     let wordIndex = 0;
-                    for (let w = 0; w < wordBreaks.length; w++) {
-                      if (progress < wordBreaks[w]) {
+                    for (let w = 0; w < wordTimestamps.length; w++) {
+                      if (currentTime >= wordTimestamps[w].startTime) {
                         wordIndex = w;
+                      } else {
                         break;
                       }
-                      wordIndex = w;
                     }
-                    wordIndex = Math.min(wordIndex, words.length - 1);
                     
                     if (wordIndex !== lastWordIndex) {
                       lastWordIndex = wordIndex;
