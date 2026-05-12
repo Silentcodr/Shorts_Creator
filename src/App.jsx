@@ -253,9 +253,19 @@ function App() {
       }
     };
 
-    recorder.start();
-
     if (audioMode === 'elevenlabs') {
+      // Set up Web Audio API to capture ElevenLabs audio into the recording
+      const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+      const audioDest = audioContext.createMediaStreamDestination();
+      
+      // Add audio track to the recording stream so video has sound
+      audioDest.stream.getAudioTracks().forEach(track => {
+        finalStream.addTrack(track);
+      });
+      
+      // Now start the recorder AFTER audio track is added
+      recorder.start();
+
       let isPlaying = true;
       let currentWordToDraw = '';
       let wordTime = performance.now();
@@ -294,9 +304,15 @@ function App() {
             const blob = await response.blob();
             const audioUrl = URL.createObjectURL(blob);
             const audio = new Audio(audioUrl);
+            audio.crossOrigin = 'anonymous';
 
             await new Promise((resolve) => {
               audio.onloadedmetadata = () => {
+                // Pipe audio through AudioContext so MediaRecorder captures it
+                const source = audioContext.createMediaElementSource(audio);
+                source.connect(audioDest);          // -> recording
+                source.connect(audioContext.destination); // -> speakers
+                
                 const words = chunkText.split(/\s+/).filter(w => w);
                 
                 // Group words into phrases (sentences or max 6 words)
@@ -397,17 +413,20 @@ function App() {
           drawFrame(ctx, canvas.width, canvas.height, {words: [], activeIndex: -1}, performance.now(), backgroundStyle);
           setTimeout(() => {
             if (recorder.state === 'recording') recorder.stop();
+            audioContext.close();
           }, 500);
 
         } catch (error) {
           alert("Error generating voice: " + error.message);
           if (recorder.state === 'recording') recorder.stop();
+          audioContext.close();
         }
       };
 
       processElevenLabs();
 
     } else if (audioMode === 'tts') {
+      recorder.start();
       let isPlaying = true;
       let wordTime = performance.now();
       setCurrentWord('');
@@ -500,6 +519,7 @@ function App() {
       processTTS();
 
     } else {
+      recorder.start();
       // Mic mode logic
       const words = text.replace(/\n/g, ' ').replace(/---/g, ' ').split(' ').filter(w => w.trim() !== '');
       
