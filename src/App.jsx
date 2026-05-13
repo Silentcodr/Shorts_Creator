@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
-import { Play, Download, Type, Loader2, Image } from 'lucide-react';
+import { Play, Download, Type, Loader2, Image, Music, Upload, Volume2, MonitorPlay } from 'lucide-react';
 
 function App() {
   const [text, setText] = useState('Welcome to the future of content.\nThis is an auto-generated short.\nType your script here!');
@@ -18,6 +18,18 @@ function App() {
   const [elevenLabsVoices, setElevenLabsVoices] = useState([]);
   const [elevenLabsVoice, setElevenLabsVoice] = useState('');
   
+  // Background Music Settings
+  const [bgMusicFile, setBgMusicFile] = useState(null);
+  const [bgMusicVolume, setBgMusicVolume] = useState(0.15);
+  const [bgMusicName, setBgMusicName] = useState('');
+  
+  // YouTube Upload Settings
+  const [ytClientId, setYtClientId] = useState(localStorage.getItem('yt_client_id') || '');
+  const [ytUploading, setYtUploading] = useState(false);
+  const [ytResult, setYtResult] = useState(null);
+  const [videoTitle, setVideoTitle] = useState('My Short');
+  const [videoDescription, setVideoDescription] = useState('');
+  
   const BACKGROUNDS = {
     dark: { type: 'color', value: '#050508', label: 'Deep Space (Dark)' },
     purple: { type: 'gradient', colors: ['#2E0854', '#8E2DE2'], label: 'Neon Purple' },
@@ -33,6 +45,8 @@ function App() {
   const activeAudioRef = useRef(null);       // track currently playing Audio element
   const activeAudioCtxRef = useRef(null);     // track active AudioContext
   const isStoppedRef = useRef(false);         // flag to signal stop to async loops
+  const bgMusicSourceRef = useRef(null);       // track background music source node
+  const bgMusicBufferRef = useRef(null);       // decoded audio buffer for bg music
 
   useEffect(() => {
     if (audioMode === 'elevenlabs' && elevenLabsKey.trim()) {
@@ -193,6 +207,170 @@ function App() {
     });
   };
 
+  // Handle background music file upload
+  const handleBgMusicUpload = async (e) => {
+    const file = e.target.files[0];
+    if (!file) return;
+    setBgMusicName(file.name);
+    setBgMusicFile(file);
+    
+    // Pre-decode the audio buffer so it's ready when recording starts
+    try {
+      const arrayBuffer = await file.arrayBuffer();
+      const tempCtx = new (window.AudioContext || window.webkitAudioContext)();
+      const decoded = await tempCtx.decodeAudioData(arrayBuffer);
+      bgMusicBufferRef.current = decoded;
+      tempCtx.close();
+    } catch (err) {
+      alert('Could not load audio file. Please use MP3 or WAV format.');
+      setBgMusicFile(null);
+      setBgMusicName('');
+      bgMusicBufferRef.current = null;
+    }
+  };
+
+  // Start background music in the given AudioContext, connected to the given destination
+  const startBgMusic = (audioContext, audioDest) => {
+    if (!bgMusicBufferRef.current) return null;
+    
+    const source = audioContext.createBufferSource();
+    source.buffer = bgMusicBufferRef.current;
+    source.loop = true;
+    
+    const gainNode = audioContext.createGain();
+    gainNode.gain.value = bgMusicVolume;
+    
+    source.connect(gainNode);
+    gainNode.connect(audioDest);             // -> recording
+    gainNode.connect(audioContext.destination); // -> speakers
+    
+    source.start(0);
+    bgMusicSourceRef.current = source;
+    return { source, gainNode };
+  };
+
+  // Stop background music with a fade out
+  const stopBgMusic = (gainNode, audioContext) => {
+    if (bgMusicSourceRef.current && gainNode) {
+      try {
+        gainNode.gain.linearRampToValueAtTime(0, audioContext.currentTime + 0.5);
+        setTimeout(() => {
+          try { bgMusicSourceRef.current.stop(); } catch(e) {}
+          bgMusicSourceRef.current = null;
+        }, 600);
+      } catch(e) {
+        try { bgMusicSourceRef.current.stop(); } catch(e2) {}
+        bgMusicSourceRef.current = null;
+      }
+    }
+  };
+
+  // YouTube Shorts Upload
+  const uploadToYouTube = async () => {
+    if (!videoUrl || !ytClientId.trim()) {
+      alert('Please enter your YouTube Client ID and generate a video first.');
+      return;
+    }
+    
+    setYtUploading(true);
+    setYtResult(null);
+    
+    try {
+      // Step 1: Get OAuth token via popup
+      const redirectUri = window.location.origin;
+      const scope = 'https://www.googleapis.com/auth/youtube.upload';
+      const authUrl = `https://accounts.google.com/o/oauth2/v2/auth?client_id=${encodeURIComponent(ytClientId)}&redirect_uri=${encodeURIComponent(redirectUri)}&response_type=token&scope=${encodeURIComponent(scope)}&prompt=consent`;
+      
+      const accessToken = await new Promise((resolve, reject) => {
+        const popup = window.open(authUrl, 'YouTube Auth', 'width=500,height=600');
+        if (!popup) { reject(new Error('Popup blocked. Please allow popups.')); return; }
+        
+        const interval = setInterval(() => {
+          try {
+            if (popup.closed) {
+              clearInterval(interval);
+              reject(new Error('Auth cancelled.'));
+              return;
+            }
+            const popupUrl = popup.location.href;
+            if (popupUrl.includes('access_token=')) {
+              clearInterval(interval);
+              const params = new URLSearchParams(popupUrl.split('#')[1]);
+              const token = params.get('access_token');
+              popup.close();
+              if (token) resolve(token);
+              else reject(new Error('No token received.'));
+            }
+          } catch(e) {
+            // Cross-origin, popup hasn't redirected yet — keep waiting
+          }
+        }, 500);
+      });
+
+      // Step 2: Fetch the video blob
+      const videoBlob = await fetch(videoUrl).then(r => r.blob());
+      
+      // Step 3: Upload via YouTube Data API v3 (resumable upload)
+      const metadata = {
+        snippet: {
+          title: videoTitle || 'My Short',
+          description: videoDescription || 'Created with Shorts Creator',
+          categoryId: '22', // People & Blogs
+        },
+        status: {
+          privacyStatus: 'private', // Start as private, user can change later
+          selfDeclaredMadeForKids: false,
+        },
+      };
+      
+      // Initiate resumable upload
+      const initResponse = await fetch(
+        'https://www.googleapis.com/upload/youtube/v3/videos?uploadType=resumable&part=snippet,status',
+        {
+          method: 'POST',
+          headers: {
+            'Authorization': `Bearer ${accessToken}`,
+            'Content-Type': 'application/json',
+          },
+          body: JSON.stringify(metadata),
+        }
+      );
+      
+      if (!initResponse.ok) {
+        const err = await initResponse.json();
+        throw new Error(err.error?.message || 'Failed to initiate upload');
+      }
+      
+      const uploadUrl = initResponse.headers.get('Location');
+      
+      // Upload the actual video
+      const uploadResponse = await fetch(uploadUrl, {
+        method: 'PUT',
+        headers: {
+          'Content-Type': 'video/webm',
+        },
+        body: videoBlob,
+      });
+      
+      if (!uploadResponse.ok) {
+        const err = await uploadResponse.json();
+        throw new Error(err.error?.message || 'Upload failed');
+      }
+      
+      const result = await uploadResponse.json();
+      setYtResult({ 
+        success: true, 
+        videoId: result.id,
+        url: `https://youtube.com/shorts/${result.id}`
+      });
+      
+    } catch (error) {
+      setYtResult({ success: false, error: error.message });
+    } finally {
+      setYtUploading(false);
+    }
+  };
+
   const startGeneration = async () => {
     if (!text.trim()) return;
     
@@ -275,6 +453,9 @@ function App() {
       
       // Now start the recorder AFTER audio track is added
       recorder.start();
+
+      // Start background music if uploaded
+      let bgMusic = startBgMusic(audioContext, audioDest);
 
       let wordTime = performance.now();
       setCurrentWord('');
@@ -456,14 +637,17 @@ function App() {
           }
           
           drawFrame(ctx, canvas.width, canvas.height, {words: [], activeIndex: -1}, performance.now(), backgroundStyle);
+          // Fade out background music
+          if (bgMusic) stopBgMusic(bgMusic.gainNode, audioContext);
           setTimeout(() => {
             if (recorder.state === 'recording') recorder.stop();
             try { audioContext.close(); } catch(e) {}
             activeAudioCtxRef.current = null;
-          }, 500);
+          }, 700);
 
         } catch (error) {
           alert("Error generating voice: " + error.message);
+          if (bgMusic) stopBgMusic(bgMusic.gainNode, audioContext);
           if (recorder.state === 'recording') recorder.stop();
           try { audioContext.close(); } catch(e) {}
           activeAudioCtxRef.current = null;
@@ -599,6 +783,12 @@ function App() {
       activeAudioRef.current.pause();
       activeAudioRef.current.src = '';
       activeAudioRef.current = null;
+    }
+    
+    // Stop background music
+    if (bgMusicSourceRef.current) {
+      try { bgMusicSourceRef.current.stop(); } catch(e) {}
+      bgMusicSourceRef.current = null;
     }
     
     // Close AudioContext
@@ -811,6 +1001,54 @@ function App() {
             </div>
           </div>
 
+          {/* Background Music */}
+          <div className="input-group">
+            <label><Music size={16} style={{ marginRight: '0.4rem', verticalAlign: 'middle' }} /> Background Music</label>
+            <div style={{ display: 'flex', gap: '0.8rem', alignItems: 'center' }}>
+              <label 
+                className="btn btn-secondary" 
+                style={{ padding: '0.6rem 1rem', fontSize: '0.95rem', cursor: 'pointer', flex: 1 }}
+              >
+                {bgMusicName || 'Upload MP3 / WAV'}
+                <input 
+                  type="file" 
+                  accept="audio/*" 
+                  onChange={handleBgMusicUpload}
+                  disabled={isGenerating}
+                  style={{ display: 'none' }}
+                />
+              </label>
+              {bgMusicFile && (
+                <button 
+                  className="btn btn-secondary" 
+                  style={{ padding: '0.6rem 0.8rem', fontSize: '0.85rem' }}
+                  onClick={() => { setBgMusicFile(null); setBgMusicName(''); bgMusicBufferRef.current = null; }}
+                  disabled={isGenerating}
+                >
+                  ✕
+                </button>
+              )}
+            </div>
+            {bgMusicFile && (
+              <div style={{ display: 'flex', alignItems: 'center', gap: '0.8rem', marginTop: '0.5rem' }}>
+                <Volume2 size={16} style={{ color: 'var(--text-muted)', flexShrink: 0 }} />
+                <input 
+                  type="range" 
+                  min="0" max="0.5" step="0.01"
+                  value={bgMusicVolume}
+                  onChange={(e) => setBgMusicVolume(parseFloat(e.target.value))}
+                  disabled={isGenerating}
+                  style={{ flex: 1, accentColor: 'var(--primary-color)' }}
+                />
+                <span style={{ color: 'var(--text-muted)', fontSize: '0.85rem', minWidth: '35px' }}>
+                  {Math.round(bgMusicVolume * 200)}%
+                </span>
+              </div>
+            )}
+            <small style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>
+              Plays softly under the voiceover. Auto-fades on end.
+            </small>
+          </div>
           <div className="button-group" style={{ marginTop: 'auto' }}>
             {!isGenerating ? (
               <button className="btn btn-primary" style={{ width: '100%' }} onClick={startGeneration}>
@@ -841,6 +1079,103 @@ function App() {
             <a href={videoUrl} download="my-short.webm" className="btn btn-primary" style={{ width: '100%' }}>
               <Download size={20} /> Download Video
             </a>
+          )}
+
+          {/* YouTube Upload Section */}
+          {videoUrl && !isGenerating && (
+            <div style={{ 
+              width: '100%', 
+              borderTop: '1px solid rgba(255,255,255,0.08)',
+              paddingTop: '1.5rem',
+              display: 'flex', flexDirection: 'column', gap: '0.8rem'
+            }}>
+              <label style={{ fontWeight: 600, fontSize: '1.1rem', display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
+                <MonitorPlay size={20} style={{ color: '#FF0000' }} /> Upload to YouTube Shorts
+              </label>
+              
+              <input 
+                type="text"
+                className="textarea"
+                style={{ height: 'auto', padding: '0.8rem' }}
+                placeholder="Video Title"
+                value={videoTitle}
+                onChange={(e) => setVideoTitle(e.target.value)}
+              />
+              <input 
+                type="text"
+                className="textarea"
+                style={{ height: 'auto', padding: '0.8rem' }}
+                placeholder="Description (optional)"
+                value={videoDescription}
+                onChange={(e) => setVideoDescription(e.target.value)}
+              />
+              <input 
+                type="password"
+                className="textarea"
+                style={{ height: 'auto', padding: '0.8rem' }}
+                placeholder="Google OAuth Client ID"
+                value={ytClientId}
+                onChange={(e) => {
+                  setYtClientId(e.target.value);
+                  localStorage.setItem('yt_client_id', e.target.value);
+                }}
+              />
+              
+              <button 
+                className="btn btn-primary" 
+                style={{ width: '100%', background: ytUploading ? '#666' : 'linear-gradient(135deg, #FF0000 0%, #CC0000 100%)' }}
+                onClick={uploadToYouTube}
+                disabled={ytUploading || !ytClientId.trim()}
+              >
+                {ytUploading ? (
+                  <><Loader2 size={18} style={{ animation: 'spin 1s linear infinite' }} /> Uploading...</>
+                ) : (
+                  <><Upload size={18} /> Upload as Private Short</>
+                )}
+              </button>
+              
+              <small style={{ color: 'var(--text-muted)', fontSize: '0.8rem' }}>
+                Uploads as <strong>Private</strong> — you can change visibility on YouTube later.
+              </small>
+
+              {ytResult && (
+                <div style={{
+                  padding: '0.8rem 1rem',
+                  borderRadius: '12px',
+                  background: ytResult.success ? 'rgba(0, 200, 80, 0.1)' : 'rgba(255, 50, 50, 0.1)',
+                  border: `1px solid ${ytResult.success ? 'rgba(0, 200, 80, 0.3)' : 'rgba(255, 50, 50, 0.3)'}`,
+                  fontSize: '0.9rem'
+                }}>
+                  {ytResult.success ? (
+                    <span>✅ Uploaded! <a href={ytResult.url} target="_blank" rel="noopener noreferrer" style={{ color: '#FF3366', textDecoration: 'underline' }}>View on YouTube →</a></span>
+                  ) : (
+                    <span>❌ {ytResult.error}</span>
+                  )}
+                </div>
+              )}
+
+              {/* Setup Guide */}
+              <details style={{ marginTop: '0.3rem' }}>
+                <summary style={{ color: 'var(--text-muted)', fontSize: '0.85rem', cursor: 'pointer' }}>
+                  🔧 How to get a YouTube Client ID (first time only)
+                </summary>
+                <div style={{ 
+                  marginTop: '0.8rem', padding: '1rem', 
+                  background: 'rgba(0,0,0,0.3)', borderRadius: '12px',
+                  fontSize: '0.85rem', color: 'var(--text-muted)', lineHeight: 1.7
+                }}>
+                  <ol style={{ paddingLeft: '1.2rem', margin: 0 }}>
+                    <li>Go to <a href="https://console.cloud.google.com" target="_blank" rel="noopener noreferrer" style={{ color: '#FF3366' }}>console.cloud.google.com</a></li>
+                    <li>Create a new project (or use existing)</li>
+                    <li>Enable <strong>YouTube Data API v3</strong> in APIs & Services</li>
+                    <li>Go to <strong>Credentials</strong> → <strong>Create Credentials</strong> → <strong>OAuth Client ID</strong></li>
+                    <li>Set type to <strong>Web application</strong></li>
+                    <li>Add <strong>{window.location.origin}</strong> as an authorized redirect URI</li>
+                    <li>Copy the <strong>Client ID</strong> and paste it above</li>
+                  </ol>
+                </div>
+              </details>
+            </div>
           )}
 
           {/* Thumbnail Generator */}
