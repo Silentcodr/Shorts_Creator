@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
 import { Play, Download, Type, Loader2, Image, Music, Upload, Volume2, MonitorPlay } from 'lucide-react';
+import { BUILTIN_TRACKS, startBuiltinTrack } from './MusicGenerator';
 
 function App() {
   const [text, setText] = useState('Welcome to the future of content.\nThis is an auto-generated short.\nType your script here!');
@@ -22,6 +23,8 @@ function App() {
   const [bgMusicFile, setBgMusicFile] = useState(null);
   const [bgMusicVolume, setBgMusicVolume] = useState(0.15);
   const [bgMusicName, setBgMusicName] = useState('');
+  const [bgMusicSource, setBgMusicSource] = useState('none'); // 'none', 'builtin', 'upload'
+  const [selectedBuiltinTrack, setSelectedBuiltinTrack] = useState('ambient');
   
   // YouTube Upload Settings
   const [ytClientId, setYtClientId] = useState(localStorage.getItem('yt_client_id') || '');
@@ -47,6 +50,7 @@ function App() {
   const isStoppedRef = useRef(false);         // flag to signal stop to async loops
   const bgMusicSourceRef = useRef(null);       // track background music source node
   const bgMusicBufferRef = useRef(null);       // decoded audio buffer for bg music
+  const builtinTrackRef = useRef(null);         // active built-in track instance
 
   useEffect(() => {
     if (audioMode === 'elevenlabs' && elevenLabsKey.trim()) {
@@ -454,8 +458,15 @@ function App() {
       // Now start the recorder AFTER audio track is added
       recorder.start();
 
-      // Start background music if uploaded
-      let bgMusic = startBgMusic(audioContext, audioDest);
+      // Start background music (built-in or uploaded)
+      let bgMusic = null;
+      let builtinMusic = null;
+      if (bgMusicSource === 'upload' && bgMusicBufferRef.current) {
+        bgMusic = startBgMusic(audioContext, audioDest);
+      } else if (bgMusicSource === 'builtin' && selectedBuiltinTrack) {
+        builtinMusic = startBuiltinTrack(selectedBuiltinTrack, audioContext, audioDest, bgMusicVolume);
+        builtinTrackRef.current = builtinMusic;
+      }
 
       let wordTime = performance.now();
       setCurrentWord('');
@@ -639,6 +650,7 @@ function App() {
           drawFrame(ctx, canvas.width, canvas.height, {words: [], activeIndex: -1}, performance.now(), backgroundStyle);
           // Fade out background music
           if (bgMusic) stopBgMusic(bgMusic.gainNode, audioContext);
+          if (builtinMusic) { builtinMusic.stop(); builtinTrackRef.current = null; }
           setTimeout(() => {
             if (recorder.state === 'recording') recorder.stop();
             try { audioContext.close(); } catch(e) {}
@@ -648,6 +660,7 @@ function App() {
         } catch (error) {
           alert("Error generating voice: " + error.message);
           if (bgMusic) stopBgMusic(bgMusic.gainNode, audioContext);
+          if (builtinMusic) { builtinMusic.stop(); builtinTrackRef.current = null; }
           if (recorder.state === 'recording') recorder.stop();
           try { audioContext.close(); } catch(e) {}
           activeAudioCtxRef.current = null;
@@ -789,6 +802,10 @@ function App() {
     if (bgMusicSourceRef.current) {
       try { bgMusicSourceRef.current.stop(); } catch(e) {}
       bgMusicSourceRef.current = null;
+    }
+    if (builtinTrackRef.current) {
+      builtinTrackRef.current.stop();
+      builtinTrackRef.current = null;
     }
     
     // Close AudioContext
@@ -1004,37 +1021,91 @@ function App() {
           {/* Background Music */}
           <div className="input-group">
             <label><Music size={16} style={{ marginRight: '0.4rem', verticalAlign: 'middle' }} /> Background Music</label>
-            <div style={{ display: 'flex', gap: '0.8rem', alignItems: 'center' }}>
-              <label 
-                className="btn btn-secondary" 
-                style={{ padding: '0.6rem 1rem', fontSize: '0.95rem', cursor: 'pointer', flex: 1 }}
+            <div className="settings-grid" style={{ gridTemplateColumns: '1fr 1fr 1fr' }}>
+              <button 
+                className={`btn ${bgMusicSource === 'none' ? 'btn-primary' : 'btn-secondary'}`}
+                onClick={() => setBgMusicSource('none')}
+                disabled={isGenerating}
+                style={{ padding: '0.6rem', fontSize: '0.85rem' }}
               >
-                {bgMusicName || 'Upload MP3 / WAV'}
-                <input 
-                  type="file" 
-                  accept="audio/*" 
-                  onChange={handleBgMusicUpload}
-                  disabled={isGenerating}
-                  style={{ display: 'none' }}
-                />
-              </label>
-              {bgMusicFile && (
-                <button 
-                  className="btn btn-secondary" 
-                  style={{ padding: '0.6rem 0.8rem', fontSize: '0.85rem' }}
-                  onClick={() => { setBgMusicFile(null); setBgMusicName(''); bgMusicBufferRef.current = null; }}
-                  disabled={isGenerating}
-                >
-                  ✕
-                </button>
-              )}
+                None
+              </button>
+              <button 
+                className={`btn ${bgMusicSource === 'builtin' ? 'btn-primary' : 'btn-secondary'}`}
+                onClick={() => setBgMusicSource('builtin')}
+                disabled={isGenerating}
+                style={{ padding: '0.6rem', fontSize: '0.85rem' }}
+              >
+                🎵 Built-in
+              </button>
+              <button 
+                className={`btn ${bgMusicSource === 'upload' ? 'btn-primary' : 'btn-secondary'}`}
+                onClick={() => setBgMusicSource('upload')}
+                disabled={isGenerating}
+                style={{ padding: '0.6rem', fontSize: '0.85rem' }}
+              >
+                📁 Upload
+              </button>
             </div>
-            {bgMusicFile && (
+
+            {bgMusicSource === 'builtin' && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', marginTop: '0.5rem' }}>
+                {BUILTIN_TRACKS.map(track => (
+                  <button
+                    key={track.id}
+                    className={`btn ${selectedBuiltinTrack === track.id ? 'btn-primary' : 'btn-secondary'}`}
+                    style={{ 
+                      padding: '0.7rem 1rem', fontSize: '0.9rem', textAlign: 'left', 
+                      justifyContent: 'flex-start', flexDirection: 'column',
+                      alignItems: 'flex-start', gap: '0.15rem'
+                    }}
+                    onClick={() => setSelectedBuiltinTrack(track.id)}
+                    disabled={isGenerating}
+                  >
+                    <span style={{ fontWeight: 600 }}>{track.name}</span>
+                    <span style={{ fontSize: '0.75rem', opacity: 0.6, fontWeight: 400 }}>{track.description}</span>
+                  </button>
+                ))}
+                <small style={{ color: 'var(--text-muted)', fontSize: '0.8rem' }}>
+                  ✅ 100% copyright-free — synthesized in your browser
+                </small>
+              </div>
+            )}
+
+            {bgMusicSource === 'upload' && (
+              <div style={{ marginTop: '0.5rem' }}>
+                <div style={{ display: 'flex', gap: '0.8rem', alignItems: 'center' }}>
+                  <label 
+                    className="btn btn-secondary" 
+                    style={{ padding: '0.6rem 1rem', fontSize: '0.95rem', cursor: 'pointer', flex: 1 }}
+                  >
+                    {bgMusicName || 'Upload MP3 / WAV'}
+                    <input 
+                      type="file" accept="audio/*" 
+                      onChange={handleBgMusicUpload}
+                      disabled={isGenerating}
+                      style={{ display: 'none' }}
+                    />
+                  </label>
+                  {bgMusicFile && (
+                    <button 
+                      className="btn btn-secondary" 
+                      style={{ padding: '0.6rem 0.8rem', fontSize: '0.85rem' }}
+                      onClick={() => { setBgMusicFile(null); setBgMusicName(''); bgMusicBufferRef.current = null; }}
+                      disabled={isGenerating}
+                    >
+                      ✕
+                    </button>
+                  )}
+                </div>
+              </div>
+            )}
+
+            {bgMusicSource !== 'none' && (
               <div style={{ display: 'flex', alignItems: 'center', gap: '0.8rem', marginTop: '0.5rem' }}>
                 <Volume2 size={16} style={{ color: 'var(--text-muted)', flexShrink: 0 }} />
                 <input 
-                  type="range" 
-                  min="0" max="0.5" step="0.01"
+                  type="range" min="0" max="0.5" step="0.01"
                   value={bgMusicVolume}
                   onChange={(e) => setBgMusicVolume(parseFloat(e.target.value))}
                   disabled={isGenerating}
