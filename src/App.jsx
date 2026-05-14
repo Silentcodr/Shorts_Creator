@@ -351,31 +351,52 @@ function App() {
     const canvasStream = canvas.captureStream(30);
     let finalStream = canvasStream;
 
-    // Setup MediaRecorder with HIGH QUALITY settings
-    const recorderOptions = { 
-      mimeType: 'video/webm;codecs=vp9',
-      videoBitsPerSecond: 10000000 // 10 Mbps for HD quality
-    };
+    // Setup MediaRecorder — prefer MP4 (H.264) for best compatibility, fallback to WebM
+    let recorderMimeType = 'video/webm;codecs=vp9';
+    const mp4Mime = 'video/mp4;codecs=avc1,opus';
+    const mp4MimeAlt = 'video/mp4';
+    
+    if (typeof MediaRecorder.isTypeSupported === 'function') {
+      if (MediaRecorder.isTypeSupported(mp4Mime)) {
+        recorderMimeType = mp4Mime;
+      } else if (MediaRecorder.isTypeSupported(mp4MimeAlt)) {
+        recorderMimeType = mp4MimeAlt;
+      } else if (MediaRecorder.isTypeSupported('video/webm;codecs=vp9')) {
+        recorderMimeType = 'video/webm;codecs=vp9';
+      } else if (MediaRecorder.isTypeSupported('video/webm')) {
+        recorderMimeType = 'video/webm';
+      }
+    }
+    
+    const isMP4 = recorderMimeType.startsWith('video/mp4');
     let recorder;
     try {
-      recorder = new MediaRecorder(finalStream, recorderOptions);
+      recorder = new MediaRecorder(finalStream, { 
+        mimeType: recorderMimeType,
+        videoBitsPerSecond: 15_000_000 // 15 Mbps for maximum quality
+      });
     } catch (e) {
       try {
-        recorder = new MediaRecorder(finalStream, { mimeType: 'video/webm', videoBitsPerSecond: 10000000 });
+        recorder = new MediaRecorder(finalStream, { mimeType: 'video/webm', videoBitsPerSecond: 15_000_000 });
       } catch (e2) {
         recorder = new MediaRecorder(finalStream);
       }
     }
+    
+    const outputMimeType = isMP4 ? 'video/mp4' : 'video/webm';
+    const outputExtension = isMP4 ? 'mp4' : 'webm';
     
     mediaRecorderRef.current = recorder;
     recorder.ondataavailable = (e) => {
       if (e.data.size > 0) recordedChunks.current.push(e.data);
     };
     recorder.onstop = () => {
-      const blob = new Blob(recordedChunks.current, { type: 'video/webm' });
+      const blob = new Blob(recordedChunks.current, { type: outputMimeType });
       setVideoUrl(URL.createObjectURL(blob));
       setIsGenerating(false);
       setCurrentWord('');
+      // Store the extension for download
+      window.__videoExtension = outputExtension;
     };
 
     if (audioMode === 'elevenlabs') {
@@ -528,10 +549,13 @@ function App() {
                     const currentTime = audio.currentTime;
                     
                     // Binary search for the word currently being spoken
+                    // Add small offset (50ms) so text appears precisely with voice, not ahead of it
+                    const syncOffset = 0.05; // 50ms delay to prevent text appearing before voice
+                    const syncedTime = Math.max(0, currentTime - syncOffset);
                     let lo = 0, hi = wordTimestamps.length - 1, wordIndex = 0;
                     while (lo <= hi) {
                       const mid = (lo + hi) >>> 1;
-                      if (wordTimestamps[mid].startTime <= currentTime) {
+                      if (wordTimestamps[mid].startTime <= syncedTime) {
                         wordIndex = mid;
                         lo = mid + 1;
                       } else {
@@ -621,7 +645,7 @@ function App() {
               if (voice) utterance.voice = voice;
             }
             
-            utterance.rate = 0.9; 
+            utterance.rate = 0.85; 
             utterance.pitch = 1.0;
             
             const words = chunkText.split(/\s+/).filter(w => w);
@@ -976,7 +1000,7 @@ function App() {
           </div>
           
           {videoUrl && !isGenerating && (
-            <a href={videoUrl} download="my-short.webm" className="btn btn-primary" style={{ width: '100%' }}>
+            <a href={videoUrl} download={`my-short.${window.__videoExtension || 'mp4'}`} className="btn btn-primary" style={{ width: '100%' }}>
               <Download size={20} /> Download Video
             </a>
           )}
