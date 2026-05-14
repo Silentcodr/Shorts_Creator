@@ -1,6 +1,5 @@
 import { useState, useRef, useEffect } from 'react';
-import { Play, Download, Type, Loader2, Image, Music, Upload, Volume2, MonitorPlay } from 'lucide-react';
-import { BUILTIN_TRACKS, startBuiltinTrack } from './MusicGenerator';
+import { Play, Download, Type, Loader2, Image, Upload, MonitorPlay } from 'lucide-react';
 
 function App() {
   const [text, setText] = useState('Welcome to the future of content.\nThis is an auto-generated short.\nType your script here!');
@@ -19,12 +18,6 @@ function App() {
   const [elevenLabsVoices, setElevenLabsVoices] = useState([]);
   const [elevenLabsVoice, setElevenLabsVoice] = useState('');
   
-  // Background Music Settings
-  const [bgMusicFile, setBgMusicFile] = useState(null);
-  const [bgMusicVolume, setBgMusicVolume] = useState(0.15);
-  const [bgMusicName, setBgMusicName] = useState('');
-  const [bgMusicSource, setBgMusicSource] = useState('none'); // 'none', 'builtin', 'upload'
-  const [selectedBuiltinTrack, setSelectedBuiltinTrack] = useState('ambient');
   
   // YouTube Upload Settings
   const [ytClientId, setYtClientId] = useState(localStorage.getItem('yt_client_id') || '');
@@ -48,9 +41,6 @@ function App() {
   const activeAudioRef = useRef(null);       // track currently playing Audio element
   const activeAudioCtxRef = useRef(null);     // track active AudioContext
   const isStoppedRef = useRef(false);         // flag to signal stop to async loops
-  const bgMusicSourceRef = useRef(null);       // track background music source node
-  const bgMusicBufferRef = useRef(null);       // decoded audio buffer for bg music
-  const builtinTrackRef = useRef(null);         // active built-in track instance
 
   useEffect(() => {
     if (audioMode === 'elevenlabs' && elevenLabsKey.trim()) {
@@ -211,63 +201,7 @@ function App() {
     });
   };
 
-  // Handle background music file upload
-  const handleBgMusicUpload = async (e) => {
-    const file = e.target.files[0];
-    if (!file) return;
-    setBgMusicName(file.name);
-    setBgMusicFile(file);
-    
-    // Pre-decode the audio buffer so it's ready when recording starts
-    try {
-      const arrayBuffer = await file.arrayBuffer();
-      const tempCtx = new (window.AudioContext || window.webkitAudioContext)();
-      const decoded = await tempCtx.decodeAudioData(arrayBuffer);
-      bgMusicBufferRef.current = decoded;
-      tempCtx.close();
-    } catch (err) {
-      alert('Could not load audio file. Please use MP3 or WAV format.');
-      setBgMusicFile(null);
-      setBgMusicName('');
-      bgMusicBufferRef.current = null;
-    }
-  };
 
-  // Start background music in the given AudioContext, connected to the given destination
-  const startBgMusic = (audioContext, audioDest) => {
-    if (!bgMusicBufferRef.current) return null;
-    
-    const source = audioContext.createBufferSource();
-    source.buffer = bgMusicBufferRef.current;
-    source.loop = true;
-    
-    const gainNode = audioContext.createGain();
-    gainNode.gain.value = bgMusicVolume;
-    
-    source.connect(gainNode);
-    gainNode.connect(audioDest);             // -> recording
-    gainNode.connect(audioContext.destination); // -> speakers
-    
-    source.start(0);
-    bgMusicSourceRef.current = source;
-    return { source, gainNode };
-  };
-
-  // Stop background music with a fade out
-  const stopBgMusic = (gainNode, audioContext) => {
-    if (bgMusicSourceRef.current && gainNode) {
-      try {
-        gainNode.gain.linearRampToValueAtTime(0, audioContext.currentTime + 0.5);
-        setTimeout(() => {
-          try { bgMusicSourceRef.current.stop(); } catch(e) {}
-          bgMusicSourceRef.current = null;
-        }, 600);
-      } catch(e) {
-        try { bgMusicSourceRef.current.stop(); } catch(e2) {}
-        bgMusicSourceRef.current = null;
-      }
-    }
-  };
 
   // YouTube Shorts Upload
   const uploadToYouTube = async () => {
@@ -458,22 +392,6 @@ function App() {
       // Now start the recorder AFTER audio track is added
       recorder.start();
 
-      // Background music — started when first voice chunk plays
-      let bgMusic = null;
-      let builtinMusic = null;
-      let musicStarted = false;
-
-      const startMusicNow = () => {
-        if (musicStarted) return;
-        if (bgMusicSource === 'upload' && bgMusicBufferRef.current) {
-          bgMusic = startBgMusic(audioContext, audioDest);
-        } else if (bgMusicSource === 'builtin' && selectedBuiltinTrack) {
-          builtinMusic = startBuiltinTrack(selectedBuiltinTrack, audioContext, audioDest, bgMusicVolume);
-          builtinTrackRef.current = builtinMusic;
-        }
-        musicStarted = true;
-      };
-
       let wordTime = performance.now();
       setCurrentWord('');
 
@@ -577,6 +495,14 @@ function App() {
                 phrases.push({ startIndex: words.length - currentPhrase.length, words: [...currentPhrase] });
             }
 
+            // Pre-build word-to-phrase index for O(1) lookup (critical for long videos)
+            const wordToPhraseIdx = new Array(words.length);
+            for (let pi = 0; pi < phrases.length; pi++) {
+              for (let wi = phrases[pi].startIndex; wi < phrases[pi].startIndex + phrases[pi].words.length; wi++) {
+                wordToPhraseIdx[wi] = pi;
+              }
+            }
+
             await new Promise((resolve) => {
               audio.onloadedmetadata = () => {
                 if (isStoppedRef.current) { resolve(); return; }
@@ -590,9 +516,6 @@ function App() {
 
                 let lastWordIndex = -1;
 
-                // Start background music right when voice plays
-                startMusicNow();
-
                 audio.play();
                 
                 const animate = () => {
@@ -604,14 +527,15 @@ function App() {
                   if (!audio.paused && !audio.ended) {
                     const currentTime = audio.currentTime;
                     
-                    // Find the word currently being spoken using exact timestamps
-                    // Use binary-search style: find last word whose startTime <= currentTime
-                    let wordIndex = 0;
-                    for (let w = 0; w < wordTimestamps.length; w++) {
-                      if (currentTime >= wordTimestamps[w].startTime) {
-                        wordIndex = w;
+                    // Binary search for the word currently being spoken
+                    let lo = 0, hi = wordTimestamps.length - 1, wordIndex = 0;
+                    while (lo <= hi) {
+                      const mid = (lo + hi) >>> 1;
+                      if (wordTimestamps[mid].startTime <= currentTime) {
+                        wordIndex = mid;
+                        lo = mid + 1;
                       } else {
-                        break;
+                        hi = mid - 1;
                       }
                     }
                     
@@ -621,8 +545,9 @@ function App() {
                       setCurrentWord(words[wordIndex]);
                     }
                     
-                    // Find active phrase for this word
-                    const activePhrase = phrases.find(p => wordIndex >= p.startIndex && wordIndex < p.startIndex + p.words.length) || phrases[phrases.length - 1];
+                    // O(1) phrase lookup using pre-built index
+                    const phraseIdx = wordToPhraseIdx[wordIndex] ?? phrases.length - 1;
+                    const activePhrase = phrases[phraseIdx];
                     const phraseData = {
                         words: activePhrase.words,
                         activeIndex: wordIndex - activePhrase.startIndex
@@ -658,19 +583,14 @@ function App() {
           }
           
           drawFrame(ctx, canvas.width, canvas.height, {words: [], activeIndex: -1}, performance.now(), backgroundStyle);
-          // Fade out background music
-          if (bgMusic) stopBgMusic(bgMusic.gainNode, audioContext);
-          if (builtinMusic) { builtinMusic.stop(); builtinTrackRef.current = null; }
           setTimeout(() => {
             if (recorder.state === 'recording') recorder.stop();
             try { audioContext.close(); } catch(e) {}
             activeAudioCtxRef.current = null;
-          }, 700);
+          }, 500);
 
         } catch (error) {
           alert("Error generating voice: " + error.message);
-          if (bgMusic) stopBgMusic(bgMusic.gainNode, audioContext);
-          if (builtinMusic) { builtinMusic.stop(); builtinTrackRef.current = null; }
           if (recorder.state === 'recording') recorder.stop();
           try { audioContext.close(); } catch(e) {}
           activeAudioCtxRef.current = null;
@@ -680,36 +600,6 @@ function App() {
       processElevenLabs();
 
     } else if (audioMode === 'tts') {
-      // Set up AudioContext for background music in TTS mode
-      let ttsAudioCtx = null;
-      let ttsAudioDest = null;
-      let ttsBgMusic = null;
-      let ttsBuiltinMusic = null;
-
-      if (bgMusicSource !== 'none') {
-        ttsAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
-        activeAudioCtxRef.current = ttsAudioCtx;
-        ttsAudioDest = ttsAudioCtx.createMediaStreamDestination();
-
-        // Add music audio track to the recording stream
-        ttsAudioDest.stream.getAudioTracks().forEach(track => {
-          finalStream.addTrack(track);
-        });
-      }
-
-      // Music start helper — called once right before first speech
-      let musicStarted = false;
-      const startMusicNow = () => {
-        if (musicStarted || bgMusicSource === 'none' || !ttsAudioCtx) return;
-        if (bgMusicSource === 'upload' && bgMusicBufferRef.current) {
-          ttsBgMusic = startBgMusic(ttsAudioCtx, ttsAudioDest);
-        } else if (bgMusicSource === 'builtin' && selectedBuiltinTrack) {
-          ttsBuiltinMusic = startBuiltinTrack(selectedBuiltinTrack, ttsAudioCtx, ttsAudioDest, bgMusicVolume);
-          builtinTrackRef.current = ttsBuiltinMusic;
-        }
-        musicStarted = true;
-      };
-
       recorder.start();
       let isPlaying = true;
       let wordTime = performance.now();
@@ -760,6 +650,14 @@ function App() {
                 phrases.push({ startIndex: words.length - currentPhrase.length, words: [...currentPhrase] });
             }
 
+            // Pre-build word-to-phrase index for O(1) lookup
+            const wordToPhraseIdx = new Array(words.length);
+            for (let pi = 0; pi < phrases.length; pi++) {
+              for (let wi = phrases[pi].startIndex; wi < phrases[pi].startIndex + phrases[pi].words.length; wi++) {
+                wordToPhraseIdx[wi] = pi;
+              }
+            }
+
             let absoluteWordIndex = 0;
 
             if (words.length > 0) {
@@ -795,7 +693,9 @@ function App() {
             
             const ttsAnimate = () => {
                if (isPlaying) {
-                  const activePhrase = phrases.find(p => absoluteWordIndex >= p.startIndex && absoluteWordIndex < p.startIndex + p.words.length) || phrases[phrases.length - 1];
+                  // O(1) phrase lookup using pre-built index
+                  const phraseIdx = wordToPhraseIdx[absoluteWordIndex] ?? phrases.length - 1;
+                  const activePhrase = phrases[phraseIdx];
                   const phraseData = {
                       words: activePhrase ? activePhrase.words : [],
                       activeIndex: activePhrase ? absoluteWordIndex - activePhrase.startIndex : 0
@@ -806,8 +706,6 @@ function App() {
             }
             animationFrameRef.current = requestAnimationFrame(ttsAnimate);
             
-            // Start background music right when voice starts
-            startMusicNow();
             synthRef.current.speak(utterance);
           });
 
@@ -821,17 +719,9 @@ function App() {
         isPlaying = false;
         drawFrame(ctx, canvas.width, canvas.height, {words: [], activeIndex: -1}, performance.now(), backgroundStyle);
 
-        // Fade out background music
-        if (ttsBgMusic) stopBgMusic(ttsBgMusic.gainNode, ttsAudioCtx);
-        if (ttsBuiltinMusic) { ttsBuiltinMusic.stop(); builtinTrackRef.current = null; }
-
         setTimeout(() => {
           if (recorder.state === 'recording') recorder.stop();
-          if (ttsAudioCtx) {
-            try { ttsAudioCtx.close(); } catch(e) {}
-            activeAudioCtxRef.current = null;
-          }
-        }, 700); 
+        }, 500); 
       };
 
       processTTS();
@@ -847,16 +737,6 @@ function App() {
       activeAudioRef.current.pause();
       activeAudioRef.current.src = '';
       activeAudioRef.current = null;
-    }
-    
-    // Stop background music
-    if (bgMusicSourceRef.current) {
-      try { bgMusicSourceRef.current.stop(); } catch(e) {}
-      bgMusicSourceRef.current = null;
-    }
-    if (builtinTrackRef.current) {
-      builtinTrackRef.current.stop();
-      builtinTrackRef.current = null;
     }
     
     // Close AudioContext
@@ -1069,108 +949,6 @@ function App() {
             </div>
           </div>
 
-          {/* Background Music */}
-          <div className="input-group">
-            <label><Music size={16} style={{ marginRight: '0.4rem', verticalAlign: 'middle' }} /> Background Music</label>
-            <div className="settings-grid" style={{ gridTemplateColumns: '1fr 1fr 1fr' }}>
-              <button 
-                className={`btn ${bgMusicSource === 'none' ? 'btn-primary' : 'btn-secondary'}`}
-                onClick={() => setBgMusicSource('none')}
-                disabled={isGenerating}
-                style={{ padding: '0.6rem', fontSize: '0.85rem' }}
-              >
-                None
-              </button>
-              <button 
-                className={`btn ${bgMusicSource === 'builtin' ? 'btn-primary' : 'btn-secondary'}`}
-                onClick={() => setBgMusicSource('builtin')}
-                disabled={isGenerating}
-                style={{ padding: '0.6rem', fontSize: '0.85rem' }}
-              >
-                🎵 Built-in
-              </button>
-              <button 
-                className={`btn ${bgMusicSource === 'upload' ? 'btn-primary' : 'btn-secondary'}`}
-                onClick={() => setBgMusicSource('upload')}
-                disabled={isGenerating}
-                style={{ padding: '0.6rem', fontSize: '0.85rem' }}
-              >
-                📁 Upload
-              </button>
-            </div>
-
-            {bgMusicSource === 'builtin' && (
-              <div style={{ display: 'flex', flexDirection: 'column', gap: '0.5rem', marginTop: '0.5rem' }}>
-                {BUILTIN_TRACKS.map(track => (
-                  <button
-                    key={track.id}
-                    className={`btn ${selectedBuiltinTrack === track.id ? 'btn-primary' : 'btn-secondary'}`}
-                    style={{ 
-                      padding: '0.7rem 1rem', fontSize: '0.9rem', textAlign: 'left', 
-                      justifyContent: 'flex-start', flexDirection: 'column',
-                      alignItems: 'flex-start', gap: '0.15rem'
-                    }}
-                    onClick={() => setSelectedBuiltinTrack(track.id)}
-                    disabled={isGenerating}
-                  >
-                    <span style={{ fontWeight: 600 }}>{track.name}</span>
-                    <span style={{ fontSize: '0.75rem', opacity: 0.6, fontWeight: 400 }}>{track.description}</span>
-                  </button>
-                ))}
-                <small style={{ color: 'var(--text-muted)', fontSize: '0.8rem' }}>
-                  ✅ 100% copyright-free — synthesized in your browser
-                </small>
-              </div>
-            )}
-
-            {bgMusicSource === 'upload' && (
-              <div style={{ marginTop: '0.5rem' }}>
-                <div style={{ display: 'flex', gap: '0.8rem', alignItems: 'center' }}>
-                  <label 
-                    className="btn btn-secondary" 
-                    style={{ padding: '0.6rem 1rem', fontSize: '0.95rem', cursor: 'pointer', flex: 1 }}
-                  >
-                    {bgMusicName || 'Upload MP3 / WAV'}
-                    <input 
-                      type="file" accept="audio/*" 
-                      onChange={handleBgMusicUpload}
-                      disabled={isGenerating}
-                      style={{ display: 'none' }}
-                    />
-                  </label>
-                  {bgMusicFile && (
-                    <button 
-                      className="btn btn-secondary" 
-                      style={{ padding: '0.6rem 0.8rem', fontSize: '0.85rem' }}
-                      onClick={() => { setBgMusicFile(null); setBgMusicName(''); bgMusicBufferRef.current = null; }}
-                      disabled={isGenerating}
-                    >
-                      ✕
-                    </button>
-                  )}
-                </div>
-              </div>
-            )}
-
-            {bgMusicSource !== 'none' && (
-              <div style={{ display: 'flex', alignItems: 'center', gap: '0.8rem', marginTop: '0.5rem' }}>
-                <Volume2 size={16} style={{ color: 'var(--text-muted)', flexShrink: 0 }} />
-                <input 
-                  type="range" min="0" max="0.5" step="0.01"
-                  value={bgMusicVolume}
-                  onChange={(e) => setBgMusicVolume(parseFloat(e.target.value))}
-                  disabled={isGenerating}
-                  style={{ flex: 1, accentColor: 'var(--primary-color)' }}
-                />
-                <span style={{ color: 'var(--text-muted)', fontSize: '0.85rem', minWidth: '35px' }}>
-                  {Math.round(bgMusicVolume * 200)}%
-                </span>
-              </div>
-            )}
-            <small style={{ color: 'var(--text-muted)', fontSize: '0.85rem' }}>
-              Plays softly under the voiceover. Auto-fades on end.
-            </small>
-          </div>
           <div className="button-group" style={{ marginTop: 'auto' }}>
             {!isGenerating ? (
               <button className="btn btn-primary" style={{ width: '100%' }} onClick={startGeneration}>
