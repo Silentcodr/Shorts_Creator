@@ -458,15 +458,10 @@ function App() {
       // Now start the recorder AFTER audio track is added
       recorder.start();
 
-      // Start background music (built-in or uploaded)
+      // Variables for background music, will be started right before first voice chunk
       let bgMusic = null;
       let builtinMusic = null;
-      if (bgMusicSource === 'upload' && bgMusicBufferRef.current) {
-        bgMusic = startBgMusic(audioContext, audioDest);
-      } else if (bgMusicSource === 'builtin' && selectedBuiltinTrack) {
-        builtinMusic = startBuiltinTrack(selectedBuiltinTrack, audioContext, audioDest, bgMusicVolume);
-        builtinTrackRef.current = builtinMusic;
-      }
+      let musicStarted = false;
 
       let wordTime = performance.now();
       setCurrentWord('');
@@ -583,6 +578,17 @@ function App() {
                 source.connect(audioContext.destination); // -> speakers
 
                 let lastWordIndex = -1;
+
+                if (!musicStarted) {
+                  if (bgMusicSource === 'upload' && bgMusicBufferRef.current) {
+                    bgMusic = startBgMusic(audioContext, audioDest);
+                  } else if (bgMusicSource === 'builtin' && selectedBuiltinTrack) {
+                    builtinMusic = startBuiltinTrack(selectedBuiltinTrack, audioContext, audioDest, bgMusicVolume);
+                    builtinTrackRef.current = builtinMusic;
+                  }
+                  musicStarted = true;
+                }
+
                 audio.play();
                 
                 const animate = () => {
@@ -672,26 +678,20 @@ function App() {
     } else if (audioMode === 'tts') {
       // Set up AudioContext for background music in TTS mode
       let ttsAudioCtx = null;
+      let ttsAudioDest = null;
       let ttsBgMusic = null;
       let ttsBuiltinMusic = null;
+      let musicStarted = false;
 
       if (bgMusicSource !== 'none') {
         ttsAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
         activeAudioCtxRef.current = ttsAudioCtx;
-        const audioDest = ttsAudioCtx.createMediaStreamDestination();
+        ttsAudioDest = ttsAudioCtx.createMediaStreamDestination();
 
         // Add music audio track to the recording stream
-        audioDest.stream.getAudioTracks().forEach(track => {
+        ttsAudioDest.stream.getAudioTracks().forEach(track => {
           finalStream.addTrack(track);
         });
-
-        // Start background music (built-in or uploaded)
-        if (bgMusicSource === 'upload' && bgMusicBufferRef.current) {
-          ttsBgMusic = startBgMusic(ttsAudioCtx, audioDest);
-        } else if (bgMusicSource === 'builtin' && selectedBuiltinTrack) {
-          ttsBuiltinMusic = startBuiltinTrack(selectedBuiltinTrack, ttsAudioCtx, audioDest, bgMusicVolume);
-          builtinTrackRef.current = ttsBuiltinMusic;
-        }
       }
 
       recorder.start();
@@ -790,6 +790,16 @@ function App() {
             }
             animationFrameRef.current = requestAnimationFrame(ttsAnimate);
             
+            if (!musicStarted && bgMusicSource !== 'none') {
+              if (bgMusicSource === 'upload' && bgMusicBufferRef.current) {
+                ttsBgMusic = startBgMusic(ttsAudioCtx, ttsAudioDest);
+              } else if (bgMusicSource === 'builtin' && selectedBuiltinTrack) {
+                ttsBuiltinMusic = startBuiltinTrack(selectedBuiltinTrack, ttsAudioCtx, ttsAudioDest, bgMusicVolume);
+                builtinTrackRef.current = ttsBuiltinMusic;
+              }
+              musicStarted = true;
+            }
+
             synthRef.current.speak(utterance);
           });
 
