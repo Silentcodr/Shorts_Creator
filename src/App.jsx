@@ -670,6 +670,30 @@ function App() {
       processElevenLabs();
 
     } else if (audioMode === 'tts') {
+      // Set up AudioContext for background music in TTS mode
+      let ttsAudioCtx = null;
+      let ttsBgMusic = null;
+      let ttsBuiltinMusic = null;
+
+      if (bgMusicSource !== 'none') {
+        ttsAudioCtx = new (window.AudioContext || window.webkitAudioContext)();
+        activeAudioCtxRef.current = ttsAudioCtx;
+        const audioDest = ttsAudioCtx.createMediaStreamDestination();
+
+        // Add music audio track to the recording stream
+        audioDest.stream.getAudioTracks().forEach(track => {
+          finalStream.addTrack(track);
+        });
+
+        // Start background music (built-in or uploaded)
+        if (bgMusicSource === 'upload' && bgMusicBufferRef.current) {
+          ttsBgMusic = startBgMusic(ttsAudioCtx, audioDest);
+        } else if (bgMusicSource === 'builtin' && selectedBuiltinTrack) {
+          ttsBuiltinMusic = startBuiltinTrack(selectedBuiltinTrack, ttsAudioCtx, audioDest, bgMusicVolume);
+          builtinTrackRef.current = ttsBuiltinMusic;
+        }
+      }
+
       recorder.start();
       let isPlaying = true;
       let wordTime = performance.now();
@@ -778,9 +802,18 @@ function App() {
         
         isPlaying = false;
         drawFrame(ctx, canvas.width, canvas.height, {words: [], activeIndex: -1}, performance.now(), backgroundStyle);
+
+        // Fade out background music
+        if (ttsBgMusic) stopBgMusic(ttsBgMusic.gainNode, ttsAudioCtx);
+        if (ttsBuiltinMusic) { ttsBuiltinMusic.stop(); builtinTrackRef.current = null; }
+
         setTimeout(() => {
           if (recorder.state === 'recording') recorder.stop();
-        }, 500); 
+          if (ttsAudioCtx) {
+            try { ttsAudioCtx.close(); } catch(e) {}
+            activeAudioCtxRef.current = null;
+          }
+        }, 700); 
       };
 
       processTTS();
