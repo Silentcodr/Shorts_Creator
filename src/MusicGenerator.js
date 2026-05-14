@@ -481,9 +481,311 @@ function generateZen(ctx, dest, duration) {
   };
 }
 
+/**
+ * Phonk / Sigma — Heavy bass, cowbells (Trending for motivation/gym shorts)
+ */
+function generatePhonk(ctx, dest, duration) {
+  const nodes = [];
+  const masterGain = ctx.createGain();
+  masterGain.gain.value = 0.35;
+  const reverb = createReverb(ctx, 1.0, 3.0);
+  masterGain.connect(reverb);
+  reverb.connect(dest);
+
+  // Heavy distorted 808 bass
+  const bassNotes = [36, 36, 39, 34]; // C2, C2, Eb2, Bb1
+  let bassIdx = 0;
+  const bassInterval = setInterval(() => {
+    const osc = ctx.createOscillator();
+    osc.type = 'sawtooth';
+    osc.frequency.value = midiToFreq(bassNotes[bassIdx % bassNotes.length]);
+    bassIdx++;
+
+    // Distortion using waveshaper
+    const distortion = ctx.createWaveShaper();
+    const amount = 50;
+    const curve = new Float32Array(44100);
+    const deg = Math.PI / 180;
+    for (let i = 0; i < 44100; ++i) {
+      const x = (i * 2) / 44100 - 1;
+      curve[i] = ((3 + amount) * x * 20 * deg) / (Math.PI + amount * Math.abs(x));
+    }
+    distortion.curve = curve;
+    distortion.oversample = '4x';
+
+    const filter = ctx.createBiquadFilter();
+    filter.type = 'lowpass';
+    filter.frequency.value = 400;
+
+    const g = ctx.createGain();
+    const now = ctx.currentTime;
+    g.gain.setValueAtTime(0.4, now);
+    g.gain.exponentialRampToValueAtTime(0.01, now + 0.6);
+
+    osc.connect(distortion);
+    distortion.connect(filter);
+    filter.connect(g);
+    g.connect(masterGain);
+
+    osc.start(now);
+    osc.stop(now + 0.7);
+    nodes.push(osc);
+  }, 800);
+
+  // Cowbell / Pluck
+  const bellInterval = setInterval(() => {
+    const osc = ctx.createOscillator();
+    osc.type = 'square';
+    osc.frequency.value = midiToFreq(72); // C5
+    const osc2 = ctx.createOscillator();
+    osc2.type = 'triangle';
+    osc2.frequency.value = midiToFreq(79); // G5 (5th)
+
+    const filter = ctx.createBiquadFilter();
+    filter.type = 'bandpass';
+    filter.frequency.value = 800;
+
+    const g = ctx.createGain();
+    const now = ctx.currentTime;
+    g.gain.setValueAtTime(0.2, now);
+    g.gain.exponentialRampToValueAtTime(0.001, now + 0.1);
+
+    osc.connect(filter);
+    osc2.connect(filter);
+    filter.connect(g);
+    g.connect(masterGain);
+
+    osc.start(now);
+    osc2.start(now);
+    osc.stop(now + 0.2);
+    osc2.stop(now + 0.2);
+    nodes.push(osc, osc2);
+  }, 400);
+
+  // Hard Kick
+  const kickInterval = setInterval(() => {
+    const osc = ctx.createOscillator();
+    osc.type = 'sine';
+    const now = ctx.currentTime;
+    osc.frequency.setValueAtTime(150, now);
+    osc.frequency.exponentialRampToValueAtTime(40, now + 0.1);
+
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.5, now);
+    g.gain.exponentialRampToValueAtTime(0.01, now + 0.2);
+
+    osc.connect(g);
+    g.connect(masterGain);
+
+    osc.start(now);
+    osc.stop(now + 0.3);
+    nodes.push(osc);
+  }, 800);
+
+  return {
+    nodes,
+    stop: () => {
+      clearInterval(bassInterval);
+      clearInterval(bellInterval);
+      clearInterval(kickInterval);
+      masterGain.gain.linearRampToValueAtTime(0, ctx.currentTime + 0.5);
+      setTimeout(() => {
+        nodes.forEach(n => { try { n.stop?.(); n.disconnect?.(); } catch(e){} });
+        masterGain.disconnect(); reverb.disconnect();
+      }, 700);
+    }
+  };
+}
+
+/**
+ * Suspense / Mystery — Ticking, drones (Trending for True Crime / Mystery)
+ */
+function generateSuspense(ctx, dest, duration) {
+  const nodes = [];
+  const masterGain = ctx.createGain();
+  masterGain.gain.value = 0.35;
+  const reverb = createReverb(ctx, 3.0, 1.5);
+  masterGain.connect(reverb);
+  reverb.connect(dest);
+
+  // Ticking Clock
+  const tickInterval = setInterval(() => {
+    const osc = ctx.createOscillator();
+    osc.type = 'square';
+    const now = ctx.currentTime;
+    osc.frequency.setValueAtTime(1200, now);
+    osc.frequency.exponentialRampToValueAtTime(100, now + 0.05);
+
+    const filter = ctx.createBiquadFilter();
+    filter.type = 'highpass';
+    filter.frequency.value = 1000;
+
+    const g = ctx.createGain();
+    g.gain.setValueAtTime(0.08, now);
+    g.gain.exponentialRampToValueAtTime(0.001, now + 0.05);
+
+    osc.connect(filter);
+    filter.connect(g);
+    g.connect(masterGain);
+
+    osc.start(now);
+    osc.stop(now + 0.1);
+    nodes.push(osc);
+  }, 1000);
+
+  // Low Dark Drone
+  const drone = ctx.createOscillator();
+  drone.type = 'sawtooth';
+  drone.frequency.value = midiToFreq(33); // A1
+  const droneFilter = ctx.createBiquadFilter();
+  droneFilter.type = 'lowpass';
+  droneFilter.frequency.value = 150;
+  
+  // Drone LFO for pulsing
+  const lfo = ctx.createOscillator();
+  lfo.type = 'sine';
+  lfo.frequency.value = 0.5;
+  const lfoGain = ctx.createGain();
+  lfoGain.gain.value = 50;
+  lfo.connect(lfoGain);
+  lfoGain.connect(droneFilter.frequency);
+
+  const droneGain = ctx.createGain();
+  droneGain.gain.value = 0.2;
+  
+  drone.connect(droneFilter);
+  droneFilter.connect(droneGain);
+  droneGain.connect(masterGain);
+  
+  drone.start();
+  lfo.start();
+  nodes.push(drone, lfo);
+
+  // Occasional eerie dissonant chime
+  const chimeInterval = setInterval(() => {
+    if (Math.random() > 0.6) {
+      const osc = ctx.createOscillator();
+      osc.type = 'sine';
+      osc.frequency.value = midiToFreq(70); // Bb4
+      
+      const osc2 = ctx.createOscillator();
+      osc2.type = 'sine';
+      osc2.frequency.value = midiToFreq(71); // B4 (dissonant)
+
+      const g = ctx.createGain();
+      const now = ctx.currentTime;
+      g.gain.setValueAtTime(0, now);
+      g.gain.linearRampToValueAtTime(0.05, now + 0.5);
+      g.gain.exponentialRampToValueAtTime(0.001, now + 3);
+
+      osc.connect(g);
+      osc2.connect(g);
+      g.connect(masterGain);
+
+      osc.start(now);
+      osc2.start(now);
+      osc.stop(now + 3.5);
+      osc2.stop(now + 3.5);
+      nodes.push(osc, osc2);
+    }
+  }, 4000);
+
+  return {
+    nodes,
+    stop: () => {
+      clearInterval(tickInterval);
+      clearInterval(chimeInterval);
+      masterGain.gain.linearRampToValueAtTime(0, ctx.currentTime + 1.0);
+      setTimeout(() => {
+        nodes.forEach(n => { try { n.stop?.(); n.disconnect?.(); } catch(e){} });
+        masterGain.disconnect(); reverb.disconnect();
+      }, 1500);
+    }
+  };
+}
+
+/**
+ * Ethereal / Sped Up — High pitched synths, fast arp (Trending TikTok style)
+ */
+function generateEthereal(ctx, dest, duration) {
+  const nodes = [];
+  const masterGain = ctx.createGain();
+  masterGain.gain.value = 0.25;
+  const reverb = createReverb(ctx, 2.5, 2.0);
+  masterGain.connect(reverb);
+  reverb.connect(dest);
+
+  const scale = SCALES.aMinor;
+  let arpIdx = 0;
+
+  // Fast high-pitched arpeggio (Sped up feel)
+  const arpInterval = setInterval(() => {
+    const osc = ctx.createOscillator();
+    osc.type = 'sine';
+    const note = scale[arpIdx % scale.length] + 24; // High octave
+    arpIdx += 2; // Skip notes for speed feel
+    if (arpIdx >= scale.length) arpIdx = arpIdx % scale.length + 1;
+    
+    osc.frequency.value = midiToFreq(note);
+    
+    const g = ctx.createGain();
+    const now = ctx.currentTime;
+    g.gain.setValueAtTime(0.06, now);
+    g.gain.exponentialRampToValueAtTime(0.001, now + 0.15);
+    
+    osc.connect(g);
+    g.connect(masterGain);
+    
+    osc.start(now);
+    osc.stop(now + 0.2);
+    nodes.push(osc);
+  }, 125); // 125ms = 480 BPM / very fast 16ths
+
+  // Washy Pad
+  const padOsc = ctx.createOscillator();
+  padOsc.type = 'triangle';
+  padOsc.frequency.value = midiToFreq(69); // A4
+  const padGain = ctx.createGain();
+  padGain.gain.value = 0.05;
+  padOsc.connect(padGain);
+  padGain.connect(masterGain);
+  padOsc.start();
+  nodes.push(padOsc);
+
+  return {
+    nodes,
+    stop: () => {
+      clearInterval(arpInterval);
+      masterGain.gain.linearRampToValueAtTime(0, ctx.currentTime + 0.5);
+      setTimeout(() => {
+        nodes.forEach(n => { try { n.stop?.(); n.disconnect?.(); } catch(e){} });
+        masterGain.disconnect(); reverb.disconnect();
+      }, 1000);
+    }
+  };
+}
+
 // ─── EXPORTS ─────────────────────────────────────────────────────────
 
 export const BUILTIN_TRACKS = [
+  {
+    id: 'phonk',
+    name: '🔥 Phonk / Sigma',
+    description: 'Heavy 808s & cowbells — motivation/grindset shorts',
+    generator: generatePhonk,
+  },
+  {
+    id: 'suspense',
+    name: '🕵️ Suspense / Mystery',
+    description: 'Ticking clock & dark drones — true crime/storytelling',
+    generator: generateSuspense,
+  },
+  {
+    id: 'ethereal',
+    name: '✨ Ethereal / Sped Up',
+    description: 'Fast high-pitched synths — trendy TikTok aesthetic',
+    generator: generateEthereal,
+  },
   {
     id: 'ambient',
     name: '🌌 Ambient Dreamscape',
