@@ -716,14 +716,14 @@ function App() {
 
             const words = chunkText.split(/\s+/).filter(w => w);
 
-            // Journey voices don't support SSML, but all others (Neural2, Studio, Wavenet, Casual) do!
-            // Using timepoints for all supported voices ensures perfect sync.
-            const supportsTimepoints = !googleVoice.includes('Journey');
+            // Journey and Studio voices don't support SSML marks.
+            // Neural2, Wavenet, and Casual voices DO support them, allowing perfect sync.
+            const supportsTimepoints = !googleVoice.includes('Journey') && !googleVoice.includes('Studio');
             let requestBody;
             let apiEndpoint;
 
             if (!supportsTimepoints) {
-              // Plain text request on v1 endpoint (Journey only)
+              // Plain text request on v1 endpoint (Journey and Studio only)
               apiEndpoint = `https://texttospeech.googleapis.com/v1/text:synthesize?key=${googleApiKey}`;
               requestBody = {
                 input: { text: chunkText },
