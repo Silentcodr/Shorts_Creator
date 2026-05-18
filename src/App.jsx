@@ -18,6 +18,39 @@ function App() {
   const [elevenLabsVoices, setElevenLabsVoices] = useState([]);
   const [elevenLabsVoice, setElevenLabsVoice] = useState('');
   
+  // Google Cloud Settings
+  const [googleApiKey, setGoogleApiKey] = useState(localStorage.getItem('google_tts_key') || '');
+  const [googleVoice, setGoogleVoice] = useState('en-US-Neural2-F');
+  const googleVoicesList = [
+    // Confirmed Female voices
+    { id: 'en-US-Neural2-F', name: '★ Neural2 F - Bright Female (River-like)' },
+    { id: 'en-US-Neural2-H', name: '★ Neural2 H - Energetic Female' },
+    { id: 'en-US-Neural2-G', name: 'Neural2 G - Warm Female' },
+    { id: 'en-US-Neural2-C', name: 'Neural2 C - Calm Female' },
+    { id: 'en-US-Neural2-E', name: 'Neural2 E - Soft Female' },
+    { id: 'en-US-Studio-O', name: 'Studio O - Professional Female' },
+    { id: 'en-US-Wavenet-F', name: 'Wavenet F - Clear Female' },
+    { id: 'en-US-Wavenet-C', name: 'Wavenet C - Natural Female' },
+    { id: 'en-US-Wavenet-E', name: 'Wavenet E - Gentle Female' },
+    { id: 'en-US-Journey-F', name: 'Journey F - Soft Female' },
+    // Confirmed Male voices
+    { id: 'en-US-Neural2-D', name: 'Neural2 D - Deep Male' },
+    { id: 'en-US-Neural2-J', name: 'Neural2 J - Crisp Male' },
+    { id: 'en-US-Neural2-A', name: 'Neural2 A - Standard Male' },
+    { id: 'en-US-Casual-K', name: 'Casual K - Conversational Male' },
+    { id: 'en-US-Journey-D', name: 'Journey D - Deep Male' },
+  ];
+  const [googleUsage, setGoogleUsage] = useState(() => {
+    const storedMonth = localStorage.getItem('google_tts_month');
+    const currentMonth = new Date().getMonth().toString();
+    if (storedMonth !== currentMonth) {
+      localStorage.setItem('google_tts_month', currentMonth);
+      localStorage.setItem('google_tts_usage', '0');
+      return 0;
+    }
+    return parseInt(localStorage.getItem('google_tts_usage') || '0', 10);
+  });
+  
   
   // YouTube Upload Settings
   const [ytClientId, setYtClientId] = useState(localStorage.getItem('yt_client_id') || '');
@@ -27,7 +60,11 @@ function App() {
   const [videoDescription, setVideoDescription] = useState('');
   
   const BACKGROUNDS = {
+    black_pure: { type: 'color', value: '#000000', label: 'Pure Black (No Grid)', noGrid: true },
+    charcoal: { type: 'color', value: '#121212', label: 'Charcoal Dark' },
     dark: { type: 'color', value: '#050508', label: 'Deep Space (Dark)' },
+    crimson_dark: { type: 'gradient', colors: ['#1a0000', '#330000'], label: 'Dark Crimson' },
+    forest_dark: { type: 'gradient', colors: ['#001a09', '#003311'], label: 'Dark Forest' },
     purple: { type: 'gradient', colors: ['#2E0854', '#8E2DE2'], label: 'Neon Purple' },
     blue: { type: 'gradient', colors: ['#0f2027', '#203a43', '#2c5364'], label: 'Ocean Depth' },
     sunset: { type: 'gradient', colors: ['#4A0000', '#ff416c'], label: 'Dark Sunset' },
@@ -41,6 +78,7 @@ function App() {
   const activeAudioRef = useRef(null);       // track currently playing Audio element
   const activeAudioCtxRef = useRef(null);     // track active AudioContext
   const isStoppedRef = useRef(false);         // flag to signal stop to async loops
+  const generationIdRef = useRef(0);
 
   useEffect(() => {
     if (audioMode === 'elevenlabs' && elevenLabsKey.trim()) {
@@ -115,14 +153,16 @@ function App() {
       ctx.fillRect(0, 0, width, height);
     }
 
-    // Draw grid pattern for aesthetics
-    ctx.strokeStyle = 'rgba(255, 255, 255, 0.05)';
-    ctx.lineWidth = 2;
-    for(let i=0; i<width; i+=100) {
-      ctx.beginPath(); ctx.moveTo(i, 0); ctx.lineTo(i, height); ctx.stroke();
-    }
-    for(let i=0; i<height; i+=100) {
-      ctx.beginPath(); ctx.moveTo(0, i); ctx.lineTo(width, i); ctx.stroke();
+    // Draw grid pattern for aesthetics (unless disabled)
+    if (!bg.noGrid) {
+      ctx.strokeStyle = 'rgba(255, 255, 255, 0.05)';
+      ctx.lineWidth = 2;
+      for(let i=0; i<width; i+=100) {
+        ctx.beginPath(); ctx.moveTo(i, 0); ctx.lineTo(i, height); ctx.stroke();
+      }
+      for(let i=0; i<height; i+=100) {
+        ctx.beginPath(); ctx.moveTo(0, i); ctx.lineTo(width, i); ctx.stroke();
+      }
     }
 
     if (!phraseData || !phraseData.words || phraseData.words.length === 0) return;
@@ -316,6 +356,10 @@ function App() {
       alert("Please enter your ElevenLabs API Key to use Premium Voices.");
       return;
     }
+    if (audioMode === 'google' && !googleApiKey.trim()) {
+      alert("Please enter your Google Cloud API Key to use Google Cloud voices.");
+      return;
+    }
 
     // --- CLEANUP any previous session ---
     if (activeAudioRef.current) {
@@ -331,13 +375,26 @@ function App() {
       cancelAnimationFrame(animationFrameRef.current);
       animationFrameRef.current = null;
     }
-    if (mediaRecorderRef.current && mediaRecorderRef.current.state === 'recording') {
-      mediaRecorderRef.current.stop();
+    // Detach old recorder handlers BEFORE stopping so they don't interfere
+    if (mediaRecorderRef.current) {
+      mediaRecorderRef.current.ondataavailable = null;
+      mediaRecorderRef.current.onstop = null;
+      if (mediaRecorderRef.current.state === 'recording') {
+        try { mediaRecorderRef.current.stop(); } catch(e) {}
+      }
+      mediaRecorderRef.current = null;
     }
     if (synthRef.current) {
       synthRef.current.cancel();
     }
+    // Revoke old video URL to free memory
+    if (videoUrl) {
+      URL.revokeObjectURL(videoUrl);
+    }
     isStoppedRef.current = false;
+    const currentGenId = Date.now();
+    generationIdRef.current = currentGenId;
+    const isCancelled = () => isStoppedRef.current || generationIdRef.current !== currentGenId;
     // --- END CLEANUP ---
 
     setIsGenerating(true);
@@ -349,7 +406,8 @@ function App() {
     
     // Get Canvas Stream (30 FPS)
     const canvasStream = canvas.captureStream(30);
-    let finalStream = canvasStream;
+    const videoTrack = canvasStream.getVideoTracks()[0];
+    let finalStream = new MediaStream([videoTrack]);
 
     // Setup MediaRecorder — prefer MP4 (H.264) for best compatibility, fallback to WebM
     let recorderMimeType = 'video/webm;codecs=vp9';
@@ -391,6 +449,8 @@ function App() {
       if (e.data.size > 0) recordedChunks.current.push(e.data);
     };
     recorder.onstop = () => {
+      // Only update state if this recorder belongs to the current generation
+      if (generationIdRef.current !== currentGenId) return;
       const blob = new Blob(recordedChunks.current, { type: outputMimeType });
       setVideoUrl(URL.createObjectURL(blob));
       setIsGenerating(false);
@@ -526,7 +586,7 @@ function App() {
 
             await new Promise((resolve) => {
               audio.onloadedmetadata = () => {
-                if (isStoppedRef.current) { resolve(); return; }
+                if (isCancelled()) { resolve(); return; }
                 
                 activeAudioRef.current = audio; // track for cleanup
                 
@@ -540,7 +600,7 @@ function App() {
                 audio.play();
                 
                 const animate = () => {
-                  if (isStoppedRef.current) {
+                  if (isCancelled()) {
                     audio.pause();
                     resolve();
                     return;
@@ -588,14 +648,14 @@ function App() {
               };
             });
 
-            if (isStoppedRef.current) break; // exit chunk loop if stopped
+            if (isCancelled()) break; // exit chunk loop if stopped
 
             if (i < chunks.length - 1) {
               wordTime = performance.now();
               setCurrentWord('');
               
               const pauseAnimate = () => {
-                 if (isStoppedRef.current) return;
+                 if (isCancelled()) return;
                  drawFrame(ctx, canvas.width, canvas.height, {words: [], activeIndex: -1}, performance.now(), backgroundStyle);
                  animationFrameRef.current = requestAnimationFrame(pauseAnimate);
               }
@@ -615,6 +675,8 @@ function App() {
 
         } catch (error) {
           alert("Error generating voice: " + error.message);
+          setIsGenerating(false);
+          setCurrentWord('');
           if (recorder.state === 'recording') recorder.stop();
           try { audioContext.close(); } catch(e) {}
           activeAudioCtxRef.current = null;
@@ -622,6 +684,237 @@ function App() {
       };
 
       processElevenLabs();
+
+    } else if (audioMode === 'google') {
+      if (!googleApiKey.trim()) {
+        alert("Please enter your Google Cloud API Key to use Premium Voices.");
+        setIsGenerating(false);
+        setCurrentWord('');
+        return;
+      }
+
+      const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+      activeAudioCtxRef.current = audioContext;
+      const audioDest = audioContext.createMediaStreamDestination();
+      
+      audioDest.stream.getAudioTracks().forEach(track => {
+        finalStream.addTrack(track);
+      });
+      
+      recorder.start();
+
+      let wordTime = performance.now();
+      setCurrentWord('');
+
+      const processGoogleTTS = async () => {
+        try {
+          const chunks = text.split('---');
+          
+          for (let i = 0; i < chunks.length; i++) {
+            const chunkText = chunks[i].trim();
+            if (!chunkText) continue;
+
+            const words = chunkText.split(/\s+/).filter(w => w);
+
+            // Journey voices don't support SSML marks; Neural2/Casual do
+            // Only Neural2 voices support SSML marks + timepointing on v1beta1
+            const supportsTimepoints = googleVoice.includes('Neural2');
+            let requestBody;
+            let apiEndpoint;
+
+            if (!supportsTimepoints) {
+              // Plain text request on v1 endpoint (Journey, Wavenet, Studio, Casual)
+              apiEndpoint = `https://texttospeech.googleapis.com/v1/text:synthesize?key=${googleApiKey}`;
+              requestBody = {
+                input: { text: chunkText },
+                voice: { languageCode: googleVoice.substring(0, 5), name: googleVoice },
+                audioConfig: { audioEncoding: "MP3", speakingRate: 1.0 }
+              };
+            } else {
+              // SSML with marks on v1beta1 for exact word-level timing
+              let ssml = '<speak>';
+              words.forEach((w, idx) => {
+                ssml += `<mark name="w${idx}"/>${w} `;
+              });
+              ssml += '</speak>';
+              apiEndpoint = `https://texttospeech.googleapis.com/v1beta1/text:synthesize?key=${googleApiKey}`;
+              requestBody = {
+                input: { ssml: ssml },
+                voice: { languageCode: googleVoice.substring(0, 5), name: googleVoice },
+                audioConfig: { audioEncoding: "MP3", speakingRate: 1.0 },
+                enableTimePointing: ["SSML_MARK"]
+              };
+            }
+
+            const response = await fetch(apiEndpoint, {
+              method: 'POST',
+              headers: {
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify(requestBody)
+            });
+
+            if (!response.ok) {
+              const err = await response.json();
+              throw new Error(err.error?.message || 'Google TTS API Error');
+            }
+
+            const data = await response.json();
+            
+            // Track local usage
+            setGoogleUsage(prev => {
+              const newUsage = prev + chunkText.length;
+              localStorage.setItem('google_tts_usage', newUsage.toString());
+              return newUsage;
+            });
+            const audioBytes = Uint8Array.from(atob(data.audioContent), c => c.charCodeAt(0));
+            const audioBlob = new Blob([audioBytes], { type: 'audio/mpeg' });
+            const audioUrl = URL.createObjectURL(audioBlob);
+            const audio = new Audio(audioUrl);
+            audio.crossOrigin = 'anonymous';
+            
+            const phrases = [];
+            let currentPhrase = [];
+            for (let j = 0; j < words.length; j++) {
+                currentPhrase.push(words[j]);
+                if (words[j].match(/[.,!?;:]$/) || currentPhrase.length >= 5) {
+                    phrases.push({ startIndex: j - currentPhrase.length + 1, words: [...currentPhrase] });
+                    currentPhrase = [];
+                }
+            }
+            if (currentPhrase.length > 0) {
+                phrases.push({ startIndex: words.length - currentPhrase.length, words: [...currentPhrase] });
+            }
+
+            const wordToPhraseIdx = new Array(words.length);
+            for (let pi = 0; pi < phrases.length; pi++) {
+              for (let wi = phrases[pi].startIndex; wi < phrases[pi].startIndex + phrases[pi].words.length; wi++) {
+                wordToPhraseIdx[wi] = pi;
+              }
+            }
+
+            await new Promise((resolve) => {
+              audio.onloadedmetadata = () => {
+                if (isCancelled()) { resolve(); return; }
+                
+                // Build word timestamps from Google's exact timepoints
+                const wordTimestamps = [];
+                const timepoints = data.timepoints || [];
+                
+                if (timepoints.length > 0) {
+                  // Use exact timestamps from Google
+                  timepoints.forEach(tp => {
+                    const idx = parseInt(tp.markName.replace('w', ''), 10);
+                    if (idx < words.length) {
+                      wordTimestamps.push({ startTime: tp.timeSeconds, word: words[idx] });
+                    }
+                  });
+                } else {
+                  // Fallback: character-weighted estimation if timepoints unavailable
+                  const totalDuration = audio.duration;
+                  const PUNCT_PAUSE = 3;
+                  const totalWeight = words.reduce((acc, w) => {
+                    let weight = w.length;
+                    if (w.match(/[.,!?;:]$/)) weight += PUNCT_PAUSE;
+                    return acc + weight;
+                  }, 0);
+                  let currentTimeAcc = 0;
+                  words.forEach(w => {
+                    wordTimestamps.push({ startTime: currentTimeAcc, word: w });
+                    let weight = w.length;
+                    if (w.match(/[.,!?;:]$/)) weight += PUNCT_PAUSE;
+                    currentTimeAcc += (weight / totalWeight) * totalDuration;
+                  });
+                }
+
+                activeAudioRef.current = audio;
+                
+                const source = audioContext.createMediaElementSource(audio);
+                source.connect(audioDest);
+                source.connect(audioContext.destination);
+
+                let lastWordIndex = -1;
+                audio.play();
+                
+                const animate = () => {
+                  if (isCancelled()) {
+                    audio.pause();
+                    resolve();
+                    return;
+                  }
+                  if (!audio.paused && !audio.ended) {
+                    // MP3 encoder adds ~26ms silence at the start; compensate
+                    const syncedTime = Math.max(0, audio.currentTime - 0.026);
+                    
+                    let wordIndex = 0;
+                    for (let wIdx = 0; wIdx < wordTimestamps.length; wIdx++) {
+                      if (wordTimestamps[wIdx].startTime <= syncedTime) {
+                        wordIndex = wIdx;
+                      } else {
+                        break;
+                      }
+                    }
+                    
+                    if (wordIndex !== lastWordIndex) {
+                      lastWordIndex = wordIndex;
+                      wordTime = performance.now();
+                      setCurrentWord(words[wordIndex]);
+                    }
+                    
+                    const phraseIdx = wordToPhraseIdx[wordIndex] ?? phrases.length - 1;
+                    const activePhrase = phrases[phraseIdx];
+                    const phraseData = {
+                        words: activePhrase ? activePhrase.words : [],
+                        activeIndex: activePhrase ? wordIndex - activePhrase.startIndex : 0
+                    };
+                    
+                    drawFrame(ctx, canvas.width, canvas.height, phraseData, wordTime, backgroundStyle);
+                    animationFrameRef.current = requestAnimationFrame(animate);
+                  } else if (audio.ended) {
+                    activeAudioRef.current = null;
+                    resolve();
+                  }
+                };
+                animationFrameRef.current = requestAnimationFrame(animate);
+              };
+            });
+
+            if (isCancelled()) break;
+
+            if (i < chunks.length - 1) {
+              wordTime = performance.now();
+              setCurrentWord('');
+              
+              const pauseAnimate = () => {
+                 if (isCancelled()) return;
+                 drawFrame(ctx, canvas.width, canvas.height, {words: [], activeIndex: -1}, performance.now(), backgroundStyle);
+                 animationFrameRef.current = requestAnimationFrame(pauseAnimate);
+              }
+              animationFrameRef.current = requestAnimationFrame(pauseAnimate);
+              
+              await new Promise(r => setTimeout(r, 1200));
+              cancelAnimationFrame(animationFrameRef.current);
+            }
+          }
+          
+          drawFrame(ctx, canvas.width, canvas.height, {words: [], activeIndex: -1}, performance.now(), backgroundStyle);
+          setTimeout(() => {
+            if (recorder.state === 'recording') recorder.stop();
+            try { audioContext.close(); } catch(e) {}
+            activeAudioCtxRef.current = null;
+          }, 500);
+
+        } catch (error) {
+          alert("Error generating Google voice: " + error.message);
+          setIsGenerating(false);
+          setCurrentWord('');
+          if (recorder.state === 'recording') recorder.stop();
+          try { audioContext.close(); } catch(e) {}
+          activeAudioCtxRef.current = null;
+        }
+      };
+
+      processGoogleTTS();
 
     } else if (audioMode === 'tts') {
       recorder.start();
@@ -882,14 +1175,22 @@ function App() {
 
           <div className="input-group">
             <label>Audio Source</label>
-            <div className="settings-grid" style={{ gridTemplateColumns: '1fr 1fr' }}>
+            <div className="settings-grid" style={{ gridTemplateColumns: '1fr 1fr 1fr' }}>
               <button 
                 className={`btn ${audioMode === 'elevenlabs' ? 'btn-primary' : 'btn-secondary'}`}
                 onClick={() => setAudioMode('elevenlabs')}
                 disabled={isGenerating}
                 style={{ padding: '0.8rem' }}
               >
-                ElevenLabs AI
+                ElevenLabs
+              </button>
+              <button 
+                className={`btn ${audioMode === 'google' ? 'btn-primary' : 'btn-secondary'}`}
+                onClick={() => setAudioMode('google')}
+                disabled={isGenerating}
+                style={{ padding: '0.8rem' }}
+              >
+                Google Cloud
               </button>
               <button 
                 className={`btn ${audioMode === 'tts' ? 'btn-primary' : 'btn-secondary'}`}
@@ -897,7 +1198,7 @@ function App() {
                 disabled={isGenerating}
                 style={{ padding: '0.8rem' }}
               >
-                <Type size={16} /> Basic TTS
+                <Type size={16} /> Browser
               </button>
             </div>
             
@@ -950,9 +1251,78 @@ function App() {
                 </select>
               </div>
             )}
+
+            {audioMode === 'google' && (
+              <div style={{ marginTop: '1rem', display: 'flex', flexDirection: 'column', gap: '0.8rem' }}>
+                <input 
+                  type="password"
+                  className="textarea"
+                  style={{ height: 'auto', padding: '0.8rem' }}
+                  placeholder="Paste your Google Cloud API Key"
+                  value={googleApiKey}
+                  onChange={(e) => {
+                    setGoogleApiKey(e.target.value);
+                    localStorage.setItem('google_tts_key', e.target.value);
+                  }}
+                  disabled={isGenerating}
+                />
+                <div className="select-wrapper">
+                  <select 
+                    value={googleVoice} 
+                    onChange={(e) => setGoogleVoice(e.target.value)}
+                    disabled={isGenerating}
+                  >
+                    {googleVoicesList.map(voice => (
+                      <option key={voice.id} value={voice.id}>
+                        {voice.name}
+                      </option>
+                    ))}
+                  </select>
+                </div>
+                
+                <div style={{ marginTop: '0.2rem', padding: '0.5rem', background: 'rgba(0,0,0,0.2)', borderRadius: '8px' }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', fontSize: '0.8rem', color: 'var(--text-muted)', marginBottom: '0.4rem' }}>
+                    <span>Free Tier Usage (Local)</span>
+                    <span style={{ color: googleUsage > 900000 ? '#ff3333' : '#4CAF50' }}>
+                      {googleUsage.toLocaleString()} / 1,000,000
+                    </span>
+                  </div>
+                  <div style={{ width: '100%', height: '6px', background: 'rgba(255,255,255,0.1)', borderRadius: '3px', overflow: 'hidden' }}>
+                    <div style={{ 
+                      height: '100%', 
+                      width: `${Math.min((googleUsage / 1000000) * 100, 100)}%`, 
+                      background: googleUsage > 900000 ? '#ff3333' : '#4CAF50',
+                      transition: 'width 0.3s ease'
+                    }}></div>
+                  </div>
+                </div>
+                <details style={{ marginTop: '0.3rem' }}>
+                  <summary style={{ color: 'var(--text-muted)', fontSize: '0.85rem', cursor: 'pointer' }}>
+                    🔧 How to get a FREE Google Cloud API Key
+                  </summary>
+                  <div style={{ 
+                    marginTop: '0.8rem', padding: '1rem', 
+                    background: 'rgba(0,0,0,0.3)', borderRadius: '12px',
+                    fontSize: '0.85rem', color: 'var(--text-muted)', lineHeight: 1.7
+                  }}>
+                    <ol style={{ paddingLeft: '1.2rem', margin: 0 }}>
+                      <li>Go to <a href="https://console.cloud.google.com" target="_blank" rel="noopener noreferrer" style={{ color: '#FF3366' }}>console.cloud.google.com</a></li>
+                      <li>Create a new project (or use existing)</li>
+                      <li>Search for <strong>Cloud Text-to-Speech API</strong> and click <strong>Enable</strong></li>
+                      <li>Go to <strong>APIs & Services</strong> → <strong>Credentials</strong></li>
+                      <li>Click <strong>+ CREATE CREDENTIALS</strong> → <strong>API Key</strong></li>
+                      <li>Copy the key (starts with <strong>AIza...</strong>) and paste above</li>
+                    </ol>
+                    <p style={{ margin: '0.8rem 0 0 0', color: '#4CAF50', fontSize: '0.8rem' }}>
+                      💡 <strong>1,000,000 characters/month FREE</strong> — no charges if you stay within the limit!
+                    </p>
+                  </div>
+                </details>
+              </div>
+            )}
             
             <small style={{ color: 'var(--text-muted)', fontSize: '0.9rem', marginTop: '0.5rem' }}>
-              {audioMode === 'tts' ? 'Uses browser speech. Audio may not embed in the downloaded file directly yet.' : 'Premium AI voices with perfect audio-video sync.'}
+              {audioMode === 'tts' ? 'Uses browser speech. Audio may not embed in the downloaded file directly yet.' : audioMode === 'google' ? '1M free chars/month. Premium neural voices with audio-video sync.' : 'Premium AI voices with perfect audio-video sync.'}
             </small>
           </div>
 
