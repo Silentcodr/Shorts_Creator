@@ -1,5 +1,6 @@
 import { useState, useRef, useEffect } from 'react';
-import { Play, Download, Type, Loader2, Image, Upload, MonitorPlay } from 'lucide-react';
+import { Play, Download, Type, Loader2, Image, Upload, MonitorPlay, Music } from 'lucide-react';
+import { BUILTIN_TRACKS } from './MusicGenerator';
 
 function App() {
   const [text, setText] = useState('Welcome to the future of content.\nThis is an auto-generated short.\nType your script here!');
@@ -10,6 +11,7 @@ function App() {
   const [voices, setVoices] = useState([]);
   const [selectedVoice, setSelectedVoice] = useState('');
   const [backgroundStyle, setBackgroundStyle] = useState('dark');
+  const [bgMusic, setBgMusic] = useState('none');
   const [thumbnailText, setThumbnailText] = useState('');
   const [thumbnailUrl, setThumbnailUrl] = useState(null);
   
@@ -77,8 +79,15 @@ function App() {
   const synthRef = useRef(window.speechSynthesis);
   const activeAudioRef = useRef(null);       // track currently playing Audio element
   const activeAudioCtxRef = useRef(null);     // track active AudioContext
+  const activeMusicRef = useRef(null);        // track playing background music
   const isStoppedRef = useRef(false);         // flag to signal stop to async loops
   const generationIdRef = useRef(0);
+  
+  // Rendering caches
+  const offscreenCanvasRef = useRef(null);
+  const lastBgStyleRef = useRef(null);
+  const cachedPhraseRef = useRef(null);
+  const cachedLinesRef = useRef([]);
 
   useEffect(() => {
     if (audioMode === 'elevenlabs' && elevenLabsKey.trim()) {
@@ -140,73 +149,85 @@ function App() {
   }, []);
 
   const drawFrame = (ctx, width, height, phraseData, wordTime, bgStyle) => {
-    // Clear background dynamically
-    const bg = BACKGROUNDS[bgStyle] || BACKGROUNDS.dark;
+    // 1. Draw or use cached background
+    if (!offscreenCanvasRef.current || lastBgStyleRef.current !== bgStyle) {
+      const offCanvas = document.createElement('canvas');
+      offCanvas.width = width;
+      offCanvas.height = height;
+      const offCtx = offCanvas.getContext('2d');
+      const bg = BACKGROUNDS[bgStyle] || BACKGROUNDS.dark;
+      
+      if (bg.type === 'color') {
+        offCtx.fillStyle = bg.value;
+        offCtx.fillRect(0, 0, width, height);
+      } else if (bg.type === 'gradient') {
+        const gradient = offCtx.createLinearGradient(0, 0, width, height);
+        bg.colors.forEach((c, i) => gradient.addColorStop(i / (bg.colors.length - 1), c));
+        offCtx.fillStyle = gradient;
+        offCtx.fillRect(0, 0, width, height);
+      }
+      if (!bg.noGrid) {
+        offCtx.strokeStyle = 'rgba(255, 255, 255, 0.05)';
+        offCtx.lineWidth = 2;
+        for(let i=0; i<width; i+=100) { offCtx.beginPath(); offCtx.moveTo(i, 0); offCtx.lineTo(i, height); offCtx.stroke(); }
+        for(let i=0; i<height; i+=100) { offCtx.beginPath(); offCtx.moveTo(0, i); offCtx.lineTo(width, i); offCtx.stroke(); }
+      }
+      offscreenCanvasRef.current = offCanvas;
+      lastBgStyleRef.current = bgStyle;
+    }
     
-    if (bg.type === 'color') {
-      ctx.fillStyle = bg.value;
-      ctx.fillRect(0, 0, width, height);
-    } else if (bg.type === 'gradient') {
-      const gradient = ctx.createLinearGradient(0, 0, width, height);
-      bg.colors.forEach((c, i) => gradient.addColorStop(i / (bg.colors.length - 1), c));
-      ctx.fillStyle = gradient;
-      ctx.fillRect(0, 0, width, height);
-    }
-
-    // Draw grid pattern for aesthetics (unless disabled)
-    if (!bg.noGrid) {
-      ctx.strokeStyle = 'rgba(255, 255, 255, 0.05)';
-      ctx.lineWidth = 2;
-      for(let i=0; i<width; i+=100) {
-        ctx.beginPath(); ctx.moveTo(i, 0); ctx.lineTo(i, height); ctx.stroke();
-      }
-      for(let i=0; i<height; i+=100) {
-        ctx.beginPath(); ctx.moveTo(0, i); ctx.lineTo(width, i); ctx.stroke();
-      }
-    }
+    // Blit background instantly
+    ctx.drawImage(offscreenCanvasRef.current, 0, 0);
 
     if (!phraseData || !phraseData.words || phraseData.words.length === 0) return;
 
+    // 2. Cache text layout (only re-measure if phrase changes)
+    const phraseKey = phraseData.words.join('|');
+    if (cachedPhraseRef.current !== phraseKey) {
+      ctx.font = 'bold 90px Outfit, sans-serif';
+      const maxWidth = width * 0.85;
+      const lines = [];
+      let currentLine = [];
+      let currentLineWidth = 0;
+      
+      for (let i = 0; i < phraseData.words.length; i++) {
+          const w = phraseData.words[i].toUpperCase();
+          const wWidth = ctx.measureText(w + " ").width;
+          if (currentLineWidth + wWidth > maxWidth && currentLine.length > 0) {
+              lines.push(currentLine);
+              currentLine = [{ text: w, index: i, width: ctx.measureText(w).width, fullWidth: wWidth }];
+              currentLineWidth = wWidth;
+          } else {
+              currentLine.push({ text: w, index: i, width: ctx.measureText(w).width, fullWidth: wWidth });
+              currentLineWidth += wWidth;
+          }
+      }
+      if (currentLine.length > 0) lines.push(currentLine);
+      
+      cachedLinesRef.current = lines;
+      cachedPhraseRef.current = phraseKey;
+    }
+
+    // 3. Draw text from cache
     ctx.font = 'bold 90px Outfit, sans-serif';
     ctx.textAlign = 'center';
     ctx.textBaseline = 'middle';
     
-    const maxWidth = width * 0.85;
-    const lines = [];
-    let currentLine = [];
-    let currentLineWidth = 0;
-    
-    // Layout phrase statically so words don't jump
-    for (let i = 0; i < phraseData.words.length; i++) {
-        const w = phraseData.words[i].toUpperCase();
-        const wWidth = ctx.measureText(w + " ").width;
-        if (currentLineWidth + wWidth > maxWidth && currentLine.length > 0) {
-            lines.push(currentLine);
-            currentLine = [{ text: w, index: i }];
-            currentLineWidth = wWidth;
-        } else {
-            currentLine.push({ text: w, index: i });
-            currentLineWidth += wWidth;
-        }
-    }
-    if (currentLine.length > 0) lines.push(currentLine);
-    
+    const lines = cachedLinesRef.current;
     const lineHeight = 110;
     const totalHeight = lines.length * lineHeight;
     let startY = (height - totalHeight) / 2 + (lineHeight / 2);
     
     lines.forEach(line => {
         let lineWidth = 0;
-        line.forEach(lw => lineWidth += ctx.measureText(lw.text + " ").width);
-        
+        line.forEach(lw => lineWidth += lw.fullWidth);
         let startX = (width - lineWidth) / 2;
         
         line.forEach(lw => {
-            const wordWidth = ctx.measureText(lw.text).width;
-            const textCenter = startX + wordWidth / 2;
+            const textCenter = startX + lw.width / 2;
             
             if (lw.index === phraseData.activeIndex) {
-                // Current spoken word: Highlight & Pop
+                // Highlight & Pop active word
                 const age = performance.now() - wordTime;
                 const progress = Math.min(age / 150, 1);
                 const easeOut = 1 - Math.pow(1 - progress, 3);
@@ -224,18 +245,16 @@ function App() {
                 
                 ctx.restore();
             } else if (lw.index < phraseData.activeIndex) {
-                // Past words: White
                 ctx.fillStyle = '#ffffff';
                 ctx.shadowBlur = 0;
                 ctx.fillText(lw.text, textCenter, startY);
             } else {
-                // Future words: Dimmed
                 ctx.fillStyle = 'rgba(255, 255, 255, 0.2)';
                 ctx.shadowBlur = 0;
                 ctx.fillText(lw.text, textCenter, startY);
             }
             
-            startX += ctx.measureText(lw.text + " ").width;
+            startX += lw.fullWidth;
         });
         startY += lineHeight;
     });
@@ -367,6 +386,10 @@ function App() {
       activeAudioRef.current.src = '';
       activeAudioRef.current = null;
     }
+    if (activeMusicRef.current) {
+      activeMusicRef.current.stop();
+      activeMusicRef.current = null;
+    }
     if (activeAudioCtxRef.current) {
       try { activeAudioCtxRef.current.close(); } catch(e) {}
       activeAudioCtxRef.current = null;
@@ -455,21 +478,36 @@ function App() {
       setVideoUrl(URL.createObjectURL(blob));
       setIsGenerating(false);
       setCurrentWord('');
-      // Store the extension for download
       window.__videoExtension = outputExtension;
+      if (activeMusicRef.current) {
+        activeMusicRef.current.stop();
+        activeMusicRef.current = null;
+      }
     };
 
+    // --- SHARED AUDIO CONTEXT ---
+    const audioContext = new (window.AudioContext || window.webkitAudioContext)();
+    activeAudioCtxRef.current = audioContext;
+    const audioDest = audioContext.createMediaStreamDestination();
+    
+    // Add audio track to the recording stream so video has sound
+    audioDest.stream.getAudioTracks().forEach(track => {
+      finalStream.addTrack(track);
+    });
+
+    // Start background music if selected
+    if (bgMusic !== 'none') {
+      const track = BUILTIN_TRACKS.find(t => t.id === bgMusic);
+      if (track) {
+        const musicSplitter = audioContext.createGain();
+        musicSplitter.gain.value = 1.0;
+        musicSplitter.connect(audioDest);
+        musicSplitter.connect(audioContext.destination); // Play to speakers too
+        activeMusicRef.current = track.generator(audioContext, musicSplitter, 60);
+      }
+    }
+
     if (audioMode === 'elevenlabs') {
-      // Set up Web Audio API to capture ElevenLabs audio into the recording
-      const audioContext = new (window.AudioContext || window.webkitAudioContext)();
-      activeAudioCtxRef.current = audioContext; // store for cleanup
-      const audioDest = audioContext.createMediaStreamDestination();
-      
-      // Add audio track to the recording stream so video has sound
-      audioDest.stream.getAudioTracks().forEach(track => {
-        finalStream.addTrack(track);
-      });
-      
       // Now start the recorder AFTER audio track is added
       recorder.start();
 
@@ -690,16 +728,9 @@ function App() {
         alert("Please enter your Google Cloud API Key to use Premium Voices.");
         setIsGenerating(false);
         setCurrentWord('');
+        if (activeMusicRef.current) { activeMusicRef.current.stop(); activeMusicRef.current = null; }
         return;
       }
-
-      const audioContext = new (window.AudioContext || window.webkitAudioContext)();
-      activeAudioCtxRef.current = audioContext;
-      const audioDest = audioContext.createMediaStreamDestination();
-      
-      audioDest.stream.getAudioTracks().forEach(track => {
-        finalStream.addTrack(track);
-      });
       
       recorder.start();
 
@@ -1056,6 +1087,12 @@ function App() {
       activeAudioRef.current = null;
     }
     
+    // Stop Music
+    if (activeMusicRef.current) {
+      activeMusicRef.current.stop();
+      activeMusicRef.current = null;
+    }
+    
     // Close AudioContext
     if (activeAudioCtxRef.current) {
       try { activeAudioCtxRef.current.close(); } catch(e) {}
@@ -1337,6 +1374,24 @@ function App() {
                 {Object.keys(BACKGROUNDS).map(key => (
                   <option key={key} value={key}>
                     {BACKGROUNDS[key].label}
+                  </option>
+                ))}
+              </select>
+            </div>
+          </div>
+          
+          <div className="input-group">
+            <label><Music size={16} style={{ display: 'inline', verticalAlign: 'middle', marginRight: '4px' }}/> Background Music</label>
+            <div className="select-wrapper">
+              <select 
+                value={bgMusic} 
+                onChange={(e) => setBgMusic(e.target.value)}
+                disabled={isGenerating}
+              >
+                <option value="none">None (Voice Only)</option>
+                {BUILTIN_TRACKS.map(track => (
+                  <option key={track.id} value={track.id}>
+                    {track.name} - {track.description}
                   </option>
                 ))}
               </select>
